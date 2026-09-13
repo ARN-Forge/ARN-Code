@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a reproducible problem in Arn Agent Code
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include actual and expected behavior. Remove API keys and personal data.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run ...
+        2. Enter ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: OS and compiler
+      placeholder: Windows 11, MSVC 19.xx
