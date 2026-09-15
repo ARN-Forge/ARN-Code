@@ -54,6 +54,23 @@ Explain how this CMake project is organized.
 
 Use `/help` to view every available command.
 
+### Install a Windows release
+
+After a Windows release has been published, install the latest version from
+PowerShell with:
+
+```powershell
+irm https://raw.githubusercontent.com/arnecto/arn/main/scripts/install.ps1 | iex
+```
+
+This installer downloads `arn.exe` and its OpenSSL DLLs to
+`%LOCALAPPDATA%\Arn\bin`, then adds that directory to the current user's PATH.
+Open a new terminal and run `arn`.
+
+The repository and its releases must be public for that one-line installer to
+work on an arbitrary computer. For a private repository, download a release
+while signed in to GitHub or use `gh auth login` first.
+
 ## Providers and key handling
 
 Keys are entered through `/key-gemini` or `/key-deepseek` and are kept only in

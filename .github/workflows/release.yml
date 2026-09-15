@@ -1,0 +1,41 @@
+name: Release Windows
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenSSL
+        run: choco install openssl -y --no-progress
+
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B build -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL-Win64"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $package = "arn-windows-x64"
+          New-Item -ItemType Directory -Force $package | Out-Null
+          Copy-Item "build\Release\arn.exe" "$package\arn.exe"
+          Copy-Item "C:\Program Files\OpenSSL-Win64\bin\libssl-3-x64.dll" $package
+          Copy-Item "C:\Program Files\OpenSSL-Win64\bin\libcrypto-3-x64.dll" $package
+          Compress-Archive -Path "$package\*" -DestinationPath "arn-windows-x64.zip" -Force
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: arn-windows-x64.zip
