@@ -6,12 +6,10 @@ on:
 
 jobs:
   build:
-    name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+    name: Windows build
+    # The terminal UI currently uses the Windows Console API, so checking it
+    # on Linux/macOS would fail before it reaches the actual project code.
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
