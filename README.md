@@ -4,8 +4,9 @@
 It talks directly to LLM APIs—currently Gemini and DeepSeek—without Node.js,
 Python, or a heavyweight runtime.
 
-> Status: early prototype. API-backed chat works; tool execution, persistent
-> configuration, conversation history, and provider streaming are planned.
+> Status: early prototype. API-backed chat and confirmed local file tools work;
+> persistent configuration, conversation history, provider streaming, and shell
+> command execution are planned.
 
 ## Highlights
 
@@ -14,6 +15,7 @@ Python, or a heavyweight runtime.
 - Gemini and DeepSeek API support
 - Model discovery per API key and `/model` selection
 - API keys held only in process memory
+- Agent tools for listing, reading, creating, editing, and deleting project files
 - HTTPS via OpenSSL-backed `cpp-httplib`
 
 ## Quick start
@@ -60,6 +62,22 @@ screenshots, commits, or shell-history-friendly commands.
 
 Provider usage can incur costs and is subject to each provider's account limits.
 
+## Local agent tools
+
+When you ask the selected model to work on a project, ARN supplies the same
+local tools to Gemini and DeepSeek. The model can request these actions:
+
+- `list_files` and `read_file` — inspect the current project automatically;
+- `write_file` and `replace_text` — create or change a file after a `y/N`
+  confirmation;
+- `delete_file` — permanently remove one regular file, only after an explicit
+  request and confirmation.
+
+ARN captures the directory from which it was launched as its project root. It
+rejects absolute paths and paths that escape that folder, skips `.git` and
+environment files, and limits reads to 256 KiB. It does not execute shell
+commands in this release.
+
 ## Architecture
 
 ```text
@@ -68,7 +86,7 @@ src/main.cpp          Terminal UI, command routing, and interactive input
 src/api_client.cpp    Provider HTTP calls and JSON response parsing
 src/config_manager.cpp
                       Configuration placeholder
-src/tool_executor.cpp Local-tool execution placeholder
+src/tool_executor.cpp Safe local file tools and project-root boundary checks
 ```
 
 The dependency stack is deliberately small:

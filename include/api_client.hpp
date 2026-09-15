@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include "tool_executor.hpp"
+
 namespace arn {
 
 enum class Provider { none, deepseek, gemini };
@@ -17,7 +19,9 @@ class ApiClient {
 public:
     [[nodiscard]] ApiResult list_models(Provider provider, const std::string& api_key) const;
     [[nodiscard]] ApiResult submit_prompt(Provider provider, const std::string& api_key,
-                                          const std::string& model, const std::string& prompt) const;
+                                          const std::string& model, const std::string& prompt,
+                                          const ToolExecutor& tools,
+                                          const ToolExecutor::ConfirmationFn& confirm) const;
 };
 
 [[nodiscard]] std::string provider_name(Provider provider);
