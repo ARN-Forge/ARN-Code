@@ -14,12 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install OpenSSL
-        run: choco install openssl -y --no-progress
+      - name: Install OpenSSL development files
+        shell: pwsh
+        run: C:\vcpkg\vcpkg.exe install openssl:x64-windows
 
       - name: Configure
         shell: pwsh
-        run: cmake -S . -B build -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL-Win64"
+        run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake"
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -30,8 +31,8 @@ jobs:
           $package = "arn-windows-x64"
           New-Item -ItemType Directory -Force $package | Out-Null
           Copy-Item "build\Release\arn.exe" "$package\arn.exe"
-          Copy-Item "C:\Program Files\OpenSSL-Win64\bin\libssl-3-x64.dll" $package
-          Copy-Item "C:\Program Files\OpenSSL-Win64\bin\libcrypto-3-x64.dll" $package
+          Copy-Item "C:\vcpkg\installed\x64-windows\bin\libssl-3-x64.dll" $package
+          Copy-Item "C:\vcpkg\installed\x64-windows\bin\libcrypto-3-x64.dll" $package
           Compress-Archive -Path "$package\*" -DestinationPath "arn-windows-x64.zip" -Force
 
       - name: Publish GitHub release
