@@ -18,6 +18,7 @@ Python, or a heavyweight runtime.
 - In-memory conversation context for the active provider and model
 - Reused HTTPS connections and automatic retry for temporary API failures
 - Streaming model responses for Gemini and DeepSeek
+- Cancel an active model request with `Esc` or `Ctrl+C`
 - Agent tools for listing, reading, creating, editing, and deleting project files
 - HTTPS via OpenSSL-backed `cpp-httplib`
 

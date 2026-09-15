@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
@@ -16,6 +17,7 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -28,6 +30,52 @@ constexpr std::string_view crab_orange = "\x1b[38;5;208m";
 constexpr std::string_view green = "\x1b[38;5;114m";
 constexpr std::string_view dim = "\x1b[90m";
 constexpr std::string_view red = "\x1b[38;5;203m";
+
+std::atomic<std::atomic_bool*> active_cancel_flag = nullptr;
+
+BOOL WINAPI handle_console_control(DWORD type) {
+    if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT) return FALSE;
+    auto* flag = active_cancel_flag.load(std::memory_order_acquire);
+    if (!flag) return FALSE;
+    flag->store(true, std::memory_order_relaxed);
+    return TRUE;
+}
+
+class RequestCancellationWatcher {
+public:
+    RequestCancellationWatcher(std::atomic_bool& cancel_requested, arn::ApiClient& client)
+        : cancel_requested_(cancel_requested), client_(client) {
+        active_cancel_flag.store(&cancel_requested_, std::memory_order_release);
+        watcher_ = std::jthread([this](std::stop_token stop) {
+            bool escape_was_down = false;
+            while (!stop.stop_requested()) {
+                const bool escape_is_down = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+                if ((escape_is_down && !escape_was_down) ||
+                    cancel_requested_.load(std::memory_order_relaxed)) {
+                    cancel_requested_.store(true, std::memory_order_relaxed);
+                    client_.cancel_active_request();
+                    return;
+                }
+                escape_was_down = escape_is_down;
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            }
+        });
+    }
+
+    ~RequestCancellationWatcher() {
+        watcher_.request_stop();
+        if (watcher_.joinable()) watcher_.join();
+        active_cancel_flag.store(nullptr, std::memory_order_release);
+    }
+
+    RequestCancellationWatcher(const RequestCancellationWatcher&) = delete;
+    RequestCancellationWatcher& operator=(const RequestCancellationWatcher&) = delete;
+
+private:
+    std::atomic_bool& cancel_requested_;
+    arn::ApiClient& client_;
+    std::jthread watcher_;
+};
 
 void enable_ansi_colors() {
     const auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -195,6 +243,7 @@ void print_help() {
               << amber << "  /provider <name>" << reset << "        Switch provider and reset this session\n"
               << amber << "  /status" << reset << "                 Show provider, model, and key status\n"
               << amber << "  /clear-session" << reset << "          Forget this chat's context\n"
+              << amber << "  Esc / Ctrl+C" << reset << "                 Cancel the current model request\n"
               << amber << "  /clear" << reset << "                  Redraw the welcome screen\n"
               << amber << "  /exit" << reset << "                   End the session\n\n"
               << dim << "Write a normal message to ask the selected model. ARN can read project files automatically; "
@@ -361,14 +410,32 @@ int run_interactive() {
 
         if (input.front() != '/') {
             std::cout << dim << "Arnie is working…" << reset << std::flush;
-            const auto result = client.submit_prompt(provider, api_key, model, input, tools, confirm_tool_change);
+            bool printed_stream = false;
+            std::atomic_bool cancel_requested = false;
+            const auto stream_text = [&](std::string_view chunk) {
+                if (!printed_stream) {
+                    std::cout << "\r\x1b[2K\n";
+                    printed_stream = true;
+                }
+                std::cout << chunk << std::flush;
+            };
+            RequestCancellationWatcher cancellation_watcher(cancel_requested, client);
+            const auto result = client.submit_prompt(provider, api_key, model, input, tools, confirm_tool_change,
+                                                      stream_text, &cancel_requested);
             std::cout << "\r\x1b[2K" << std::flush;
-            if (result.ok) {
-                std::cout << '\n';
+            if (result.cancelled) {
+                if (printed_stream) std::cout << '\n';
+                std::cout << amber << "Request cancelled." << reset << "\n\n";
+            } else if (result.ok) {
+                if (printed_stream) {
+                    std::cout << "\n\n";
+                } else {
+                    std::cout << '\n' << result.message << "\n\n";
+                }
             } else {
-                std::cout << red << "Error: " << reset;
+                if (printed_stream) std::cout << '\n';
+                std::cout << red << "Error: " << reset << result.message << "\n\n";
             }
-            std::cout << result.message << "\n\n";
             continue;
         }
 
@@ -447,5 +514,6 @@ int wmain() {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
     enable_ansi_colors();
+    SetConsoleCtrlHandler(handle_console_control, TRUE);
     return run_interactive();
 }
