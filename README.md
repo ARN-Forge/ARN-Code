@@ -4,9 +4,9 @@
 It talks directly to LLM APIs—currently Gemini and DeepSeek—without Node.js,
 Python, or a heavyweight runtime.
 
-> Status: early prototype. API-backed chat and confirmed local file tools work;
-> persistent configuration, conversation history, provider streaming, and shell
-> command execution are planned.
+> Status: early prototype. API-backed chat, provider streaming, in-memory
+> conversation context, and confirmed local file tools work. Persistent
+> configuration and shell command execution are planned.
 
 ## Highlights
 
@@ -16,6 +16,8 @@ Python, or a heavyweight runtime.
 - Model discovery per API key and `/model` selection
 - API keys held only in process memory
 - In-memory conversation context for the active provider and model
+- Reused HTTPS connections and automatic retry for temporary API failures
+- Streaming model responses for Gemini and DeepSeek
 - Agent tools for listing, reading, creating, editing, and deleting project files
 - HTTPS via OpenSSL-backed `cpp-httplib`
 
@@ -124,6 +126,13 @@ The dependency stack is deliberately small:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and
 [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
+
+## Website
+
+The GitHub Pages landing page lives in [`docs/index.html`](docs/index.html).
+To publish it, open the repository's **Settings → Pages**, select **Deploy from
+a branch**, then choose `main` and the `/docs` folder. GitHub will publish it
+at `https://arnecto.github.io/arn/`.
 
 ## License
 

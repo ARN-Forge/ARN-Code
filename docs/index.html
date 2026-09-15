@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="ARN is a native C++ terminal coding agent for Gemini and DeepSeek.">
+  <title>ARN — native terminal coding agent</title>
+  <style>
+    :root { --bg:#071011; --panel:#0d1c1d; --line:#1b5559; --cyan:#59e3e8; --orange:#ff8a00; --amber:#fff0a5; --text:#d5dfdf; --muted:#91a4a5; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; color:var(--text); background:radial-gradient(circle at 80% 0%, #103438 0, transparent 31rem),var(--bg); font:16px/1.55 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+    a { color:inherit; }
+    .wrap { width:min(1120px, calc(100% - 40px)); margin:auto; }
+    nav { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:25px 0; }
+    .brand { color:var(--cyan); font-weight:800; letter-spacing:.12em; text-decoration:none; }
+    nav a:not(.brand) { color:var(--muted); text-decoration:none; }
+    nav a:not(.brand):hover { color:var(--cyan); }
+    .hero { padding:64px 0 84px; display:grid; grid-template-columns:1.1fr .9fr; gap:48px; align-items:center; }
+    .eyebrow { color:var(--cyan); letter-spacing:.1em; text-transform:uppercase; font-size:.85rem; }
+    h1 { margin:.3rem 0 1.2rem; color:#f3ffff; font-size:clamp(2.4rem, 6vw, 5rem); letter-spacing:-.07em; line-height:1; }
+    .lead { color:var(--muted); font-size:1.1rem; max-width:42rem; }
+    .actions { display:flex; flex-wrap:wrap; gap:12px; margin-top:28px; }
+    .button { border:1px solid var(--cyan); background:var(--cyan); color:#062022; padding:11px 16px; border-radius:7px; text-decoration:none; font-weight:800; }
+    .button.secondary { background:transparent; color:var(--cyan); }
+    .terminal { position:relative; padding:19px; border:1px solid var(--cyan); border-radius:10px; background:#050a0b; box-shadow:0 0 60px #00cbd21c; overflow:hidden; }
+    .terminal::before { content:"● ● ●"; display:block; color:var(--orange); letter-spacing:.35em; font-size:.7rem; margin-bottom:18px; }
+    .crab { color:var(--orange); font-size:clamp(1.25rem, 2.6vw, 1.9rem); line-height:1.05; white-space:pre; margin:12px 0 20px; }
+    .prompt { color:var(--cyan); } .command { color:var(--amber); } .reply { color:var(--text); } .cursor { color:var(--cyan); animation:blink 1s step-end infinite; } @keyframes blink { 50% { opacity:0; } }
+    section { padding:72px 0; border-top:1px solid #174044; }
+    h2 { color:#f3ffff; font-size:clamp(1.6rem, 3vw, 2.4rem); letter-spacing:-.05em; margin:0 0 16px; }
+    .section-lead { color:var(--muted); max-width:48rem; margin:0 0 30px; }
+    .grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:16px; }
+    .card { padding:22px; background:linear-gradient(145deg, #102224, #0a1617); border:1px solid #1b484c; border-radius:10px; }
+    .card .icon { color:var(--orange); font-size:1.35rem; } .card h3 { color:var(--amber); margin:10px 0 7px; font-size:1rem; } .card p { color:var(--muted); margin:0; font-size:.93rem; }
+    .install { padding:25px; border:1px solid var(--line); border-radius:10px; background:#050a0b; }
+    pre { overflow:auto; margin:0; color:#d5dfdf; white-space:pre-wrap; }
+    .copy-note { color:var(--muted); font-size:.88rem; margin:14px 0 0; }
+    .steps { counter-reset:steps; display:grid; gap:12px; padding:0; list-style:none; }
+    .steps li { counter-increment:steps; padding:14px 14px 14px 52px; background:#0a1718; border-left:2px solid var(--cyan); position:relative; }
+    .steps li::before { content:counter(steps); position:absolute; left:18px; color:var(--cyan); font-weight:bold; }
+    footer { padding:40px 0 56px; color:var(--muted); font-size:.9rem; } footer a { color:var(--cyan); }
+    @media (max-width:760px) { .hero { grid-template-columns:1fr; padding:35px 0 58px; gap:24px; } .grid { grid-template-columns:1fr; } nav { font-size:.9rem; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav>
+      <a class="brand" href="#top">ARN</a>
+      <a href="https://github.com/arnecto/arn">GitHub ↗</a>
+    </nav>
+
+    <main id="top">
+      <section class="hero" style="border-top:0">
+        <div>
+          <div class="eyebrow">native C++23 coding agent</div>
+          <h1>Bring your own model. Keep your flow.</h1>
+          <p class="lead">ARN is a fast terminal companion for coding workflows. Connect Gemini or DeepSeek, give it a project folder, and review every file change before it happens.</p>
+          <div class="actions">
+            <a class="button" href="#install">Install for Windows</a>
+            <a class="button secondary" href="https://github.com/arnecto/arn/releases">View releases ↗</a>
+          </div>
+        </div>
+        <div class="terminal" aria-label="ARN terminal preview">
+          <div class="crab">▄▄          ▄▄
+▄▀██▄▀██▀▄██▀▄
+   ▀██████▀
+    ▄▀▀▀▀▄</div>
+          <div><span class="prompt">arn › </span><span class="command">Create a Python Caesar cipher script</span></div>
+          <div class="reply">Arny wants to change files: Create caesar.py</div>
+          <div><span class="prompt">Allow this action? [y/N]: </span><span class="cursor">█</span></div>
+        </div>
+      </section>
+
+      <section id="features">
+        <div class="eyebrow">Made for the terminal</div>
+        <h2>Small runtime. Serious guardrails.</h2>
+        <p class="section-lead">No Node.js, no Python runtime, and no background account. API keys and conversation history stay in memory for the active session.</p>
+        <div class="grid">
+          <article class="card"><div class="icon">✦</div><h3>Gemini + DeepSeek</h3><p>Choose a model per API key and keep a focused, in-memory conversation context.</p></article>
+          <article class="card"><div class="icon">↯</div><h3>Streaming replies</h3><p>See the model response as it is generated instead of waiting for the whole answer.</p></article>
+          <article class="card"><div class="icon">⌘</div><h3>Safe file tools</h3><p>Read, create, edit, and delete files only inside the launch folder—with confirmation for changes.</p></article>
+        </div>
+      </section>
+
+      <section id="install">
+        <div class="eyebrow">Windows</div>
+        <h2>Install from a terminal.</h2>
+        <p class="section-lead">Run this in PowerShell. It downloads the latest public ARN release and adds it to your user PATH.</p>
+        <div class="install"><pre><code>irm https://raw.githubusercontent.com/arnecto/arn/main/scripts/install.ps1 | iex</code></pre></div>
+        <p class="copy-note">Open a new terminal afterward, then run <code>arn</code>.</p>
+      </section>
+
+      <section id="start">
+        <div class="eyebrow">First session</div>
+        <h2>Connect, choose a model, build.</h2>
+        <ol class="steps">
+          <li>Start ARN from the folder where you want it to work.</li>
+          <li>Add a key with <code>/key-gemini</code> or <code>/key-deepseek</code>, then select a model.</li>
+          <li>Ask naturally. ARN asks before any file is created, edited, or deleted.</li>
+        </ol>
+      </section>
+    </main>
+
+    <footer>Built by <a href="https://github.com/arnecto">arnecto</a> · <a href="https://github.com/arnecto/arn">Source code</a></footer>
+  </div>
+</body>
+</html>
