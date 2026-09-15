@@ -14,6 +14,7 @@ namespace {
 
 using json = nlohmann::json;
 constexpr int max_tool_rounds = 12;
+constexpr std::size_t max_history_entries = 40;
 
 std::string error_message(const json& body) {
     if (const auto error = body.find("error"); error != body.end()) {
@@ -74,6 +75,12 @@ ToolExecution execute_tool(const ToolExecutor& tools, const ToolExecutor::Confir
     return tools.execute(name, arguments, confirm);
 }
 
+void trim_history(json& history, std::size_t keep_from) {
+    while (history.size() > max_history_entries) {
+        history.erase(history.begin() + static_cast<json::difference_type>(keep_from));
+    }
+}
+
 ApiResult deepseek_models(const std::string& api_key) {
     httplib::Client client("https://api.deepseek.com");
     client.set_connection_timeout(10, 0);
@@ -113,12 +120,14 @@ ApiResult gemini_models(const std::string& api_key) {
 }
 
 ApiResult deepseek_prompt(const std::string& api_key, const std::string& model, const std::string& prompt,
-                          const ToolExecutor& tools, const ToolExecutor::ConfirmationFn& confirm) {
+                          const ToolExecutor& tools, const ToolExecutor::ConfirmationFn& confirm,
+                          json& messages) {
     httplib::Client client("https://api.deepseek.com");
     client.set_connection_timeout(10, 0);
     client.set_read_timeout(90, 0);
-    json messages = json::array({{{"role", "system"}, {"content", agent_instruction()}},
-                                 {{"role", "user"}, {"content", prompt}}});
+    if (messages.empty()) messages.push_back({{"role", "system"}, {"content", agent_instruction()}});
+    messages.push_back({{"role", "user"}, {"content", prompt}});
+    trim_history(messages, 1); // preserve the system instruction
     const auto definitions = tool_definitions();
     for (int round = 0; round < max_tool_rounds; ++round) {
         json api_tools = json::array();
@@ -146,11 +155,13 @@ ApiResult deepseek_prompt(const std::string& api_key, const std::string& model, 
 }
 
 ApiResult gemini_prompt(const std::string& api_key, const std::string& model, const std::string& prompt,
-                        const ToolExecutor& tools, const ToolExecutor::ConfirmationFn& confirm) {
+                        const ToolExecutor& tools, const ToolExecutor::ConfirmationFn& confirm,
+                        json& contents) {
     httplib::Client client("https://generativelanguage.googleapis.com");
     client.set_connection_timeout(10, 0);
     client.set_read_timeout(90, 0);
-    json contents = json::array({{{"role", "user"}, {"parts", {{{"text", prompt}}}}}});
+    contents.push_back({{"role", "user"}, {"parts", {{{"text", prompt}}}}});
+    trim_history(contents, 0);
     const json tool_config = json::array({{{"functionDeclarations", tool_definitions()}}});
     for (int round = 0; round < max_tool_rounds; ++round) {
         const json payload = {{"systemInstruction", {{"parts", {{{"text", agent_instruction()}}}}}},
@@ -202,12 +213,28 @@ ApiResult ApiClient::list_models(Provider provider, const std::string& api_key) 
 
 ApiResult ApiClient::submit_prompt(Provider provider, const std::string& api_key, const std::string& model,
                                    const std::string& prompt, const ToolExecutor& tools,
-                                   const ToolExecutor::ConfirmationFn& confirm) const {
+                                   const ToolExecutor::ConfirmationFn& confirm) {
     if (api_key.empty()) return {false, "No API key is set."};
     if (model.empty()) return {false, "No model is selected. Use /model <name>."};
-    if (provider == Provider::deepseek) return deepseek_prompt(api_key, model, prompt, tools, confirm);
-    if (provider == Provider::gemini) return gemini_prompt(api_key, model, prompt, tools, confirm);
+    if (provider != session_provider_ || model != session_model_) {
+        reset_session();
+        session_provider_ = provider;
+        session_model_ = model;
+    }
+    if (provider == Provider::deepseek) return deepseek_prompt(api_key, model, prompt, tools, confirm, deepseek_messages_);
+    if (provider == Provider::gemini) return gemini_prompt(api_key, model, prompt, tools, confirm, gemini_contents_);
     return {false, "Select a provider first."};
+}
+
+void ApiClient::reset_session() {
+    session_provider_ = Provider::none;
+    session_model_.clear();
+    deepseek_messages_ = json::array();
+    gemini_contents_ = json::array();
+}
+
+std::size_t ApiClient::session_entries() const noexcept {
+    return session_provider_ == Provider::deepseek ? deepseek_messages_.size() : gemini_contents_.size();
 }
 
 } // namespace arn

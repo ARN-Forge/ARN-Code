@@ -15,6 +15,7 @@ Python, or a heavyweight runtime.
 - Gemini and DeepSeek API support
 - Model discovery per API key and `/model` selection
 - API keys held only in process memory
+- In-memory conversation context for the active provider and model
 - Agent tools for listing, reading, creating, editing, and deleting project files
 - HTTPS via OpenSSL-backed `cpp-httplib`
 
@@ -94,6 +95,14 @@ ARN captures the directory from which it was launched as its project root. It
 rejects absolute paths and paths that escape that folder, skips `.git` and
 environment files, and limits reads to 256 KiB. It does not execute shell
 commands in this release.
+
+## Conversation context
+
+ARN keeps the current chat in memory while it is running, so follow-up prompts
+can refer to previous messages and tool results. Context is never written to
+disk. Changing provider, setting a new key, selecting another model, using
+`/clear-session`, or exiting ARN starts a fresh chat. To keep requests bounded,
+the oldest entries are discarded after the history reaches 40 entries.
 
 ## Architecture
 

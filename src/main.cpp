@@ -194,6 +194,7 @@ void print_help() {
               << amber << "  /models" << reset << "                 Show models for the active key\n"
               << amber << "  /provider <name>" << reset << "        Switch provider and reset this session\n"
               << amber << "  /status" << reset << "                 Show provider, model, and key status\n"
+              << amber << "  /clear-session" << reset << "          Forget this chat's context\n"
               << amber << "  /clear" << reset << "                  Redraw the welcome screen\n"
               << amber << "  /exit" << reset << "                   End the session\n\n"
               << dim << "Write a normal message to ask the selected model. ARN can read project files automatically; "
@@ -216,6 +217,7 @@ constexpr std::array command_hints{
     std::pair{"/models", "list available models"},
     std::pair{"/provider", "switch provider"},
     std::pair{"/status", "show session status"},
+    std::pair{"/clear-session", "forget chat context"},
     std::pair{"/help", "show all commands"},
     std::pair{"/clear", "redraw welcome"},
     std::pair{"/exit", "leave arn"},
@@ -384,7 +386,11 @@ int run_interactive() {
         } else if (command == "/status") {
             std::cout << "Provider: " << arn::provider_name(provider) << "\n"
                       << "Model: " << (model.empty() ? "not selected" : model) << "\n"
-                      << "API key: " << (api_key.empty() ? "not set" : "set for this session") << "\n";
+                      << "API key: " << (api_key.empty() ? "not set" : "set for this session") << "\n"
+                      << "Chat context: " << (client.session_entries() == 0 ? "empty" : "active") << "\n";
+        } else if (command == "/clear-session") {
+            client.reset_session();
+            std::cout << green << "✓ " << reset << "Chat context cleared. Your key and model are unchanged.\n";
         } else if (command == "/models") {
             if (models.empty()) std::cout << "No verified API key is active.\n";
             else print_models(models);
@@ -397,6 +403,7 @@ int run_interactive() {
                 api_key.clear();
                 models.clear();
                 model.clear();
+                client.reset_session();
                 std::cout << green << "✓ " << reset << "Active provider: " << arn::provider_name(provider) << "\n";
             }
         } else if (command == "/key-deepseek" || command == "/key-gemini") {
@@ -414,6 +421,7 @@ int run_interactive() {
                 api_key = candidate;
                 models = result.models;
                 model = models.front();
+                client.reset_session();
                 std::cout << green << "✓ " << reset << result.message << " Default model: " << amber << model << reset << "\n";
                 print_models(models);
                 std::cout << "Use /model <name> to choose another model.\n";
@@ -423,6 +431,7 @@ int run_interactive() {
             if (std::ranges::find(models, selected) == models.end()) {
                 std::cout << "That model is not in the active provider's list. Use /models.\n";
             } else {
+                client.reset_session();
                 model = selected;
                 std::cout << green << "✓ " << reset << "Active model: " << amber << model << reset << "\n";
             }
