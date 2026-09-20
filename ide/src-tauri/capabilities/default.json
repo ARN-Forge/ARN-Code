@@ -1,0 +1,9 @@
+{
+  "extends": "@tauri-apps/cli/schema/capabilities",
+  "capabilities": [
+    {
+      "name": "core:tauri:allow-dialog-open",
+      "permissions": ["dialog:open"]
+    }
+  ]
+}
