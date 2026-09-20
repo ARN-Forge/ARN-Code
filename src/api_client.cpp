@@ -369,6 +369,9 @@ ApiResult gemini_prompt(const std::string& api_key, const std::string& model, co
                               {"contents", contents}, {"tools", tool_config}};
         std::string text;
         json function_calls = json::array();
+        // Gemini 3 can attach thoughtSignature to the Part containing a
+        // function call. Preserve every raw Part for the next API turn.
+        json model_response_parts = json::array();
         std::string error_body;
         bool received_event = false;
         const auto response = execute_stream_with_retry([&] {
@@ -380,6 +383,7 @@ ApiResult gemini_prompt(const std::string& api_key, const std::string& model, co
                     for (const auto& packet : packets) {
                         const auto& content = packet.at("candidates").at(0).at("content");
                         for (const auto& part : content.at("parts")) {
+                            model_response_parts.push_back(part);
                             if (part.contains("text")) {
                                 const auto chunk = part.at("text").get<std::string>();
                                 text += chunk;
@@ -400,11 +404,8 @@ ApiResult gemini_prompt(const std::string& api_key, const std::string& model, co
         if (!response) return {false, "Network request failed: " + httplib::to_string(response.error())};
         if (response->status < 200 || response->status >= 300) return parse_error(response->status, "Gemini", error_body);
         try {
-            json model_parts = json::array();
-            if (!text.empty()) model_parts.push_back({{"text", text}});
-            for (const auto& call : function_calls) model_parts.push_back({{"functionCall", call}});
-            if (model_parts.empty()) return {false, "Gemini returned an empty streamed response."};
-            contents.push_back({{"role", "model"}, {"parts", model_parts}});
+            if (model_response_parts.empty()) return {false, "Gemini returned an empty streamed response."};
+            contents.push_back({{"role", "model"}, {"parts", model_response_parts}});
             json response_parts = json::array();
             for (const auto& call : function_calls) {
                 const auto execution = execute_tool(tools, confirm, call.at("name").get<std::string>(), call.value("args", json::object()));

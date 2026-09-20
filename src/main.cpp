@@ -8,12 +8,9 @@
 #include <conio.h>
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
-#include <cstdlib>
-#include <future>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -23,497 +20,408 @@
 
 namespace {
 
-constexpr std::string_view reset = "\x1b[0m";
-constexpr std::string_view cyan = "\x1b[38;5;81m";
-constexpr std::string_view amber = "\x1b[38;5;215m";
-constexpr std::string_view crab_orange = "\x1b[38;5;208m";
-constexpr std::string_view green = "\x1b[38;5;114m";
-constexpr std::string_view dim = "\x1b[90m";
-constexpr std::string_view red = "\x1b[38;5;203m";
+constexpr std::string_view reset = "\x1b[0m", cyan = "\x1b[38;5;81m", amber = "\x1b[38;5;215m";
+constexpr std::string_view orange = "\x1b[38;5;208m", green = "\x1b[38;5;114m";
+constexpr std::string_view dim = "\x1b[90m", red = "\x1b[38;5;203m";
 
 std::atomic<std::atomic_bool*> active_cancel_flag = nullptr;
 
 BOOL WINAPI handle_console_control(DWORD type) {
     if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT) return FALSE;
-    auto* flag = active_cancel_flag.load(std::memory_order_acquire);
-    if (!flag) return FALSE;
-    flag->store(true, std::memory_order_relaxed);
+    if (auto* flag = active_cancel_flag.load(std::memory_order_acquire)) {
+        flag->store(true, std::memory_order_relaxed);
+    }
+    // Windows Terminal handles Ctrl+C itself while text is selected. If the
+    // event reaches ARN, consume it so copying (or an accidental Ctrl+C at the
+    // prompt) never terminates the whole session. During a request it still
+    // acts as cancellation through active_cancel_flag.
     return TRUE;
 }
 
-class RequestCancellationWatcher {
+class AlternateScreen {
 public:
-    RequestCancellationWatcher(std::atomic_bool& cancel_requested, arn::ApiClient& client)
-        : cancel_requested_(cancel_requested), client_(client) {
-        active_cancel_flag.store(&cancel_requested_, std::memory_order_release);
-        watcher_ = std::jthread([this](std::stop_token stop) {
-            bool escape_was_down = false;
-            while (!stop.stop_requested()) {
-                const bool escape_is_down = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-                if ((escape_is_down && !escape_was_down) ||
-                    cancel_requested_.load(std::memory_order_relaxed)) {
-                    cancel_requested_.store(true, std::memory_order_relaxed);
-                    client_.cancel_active_request();
-                    return;
-                }
-                escape_was_down = escape_is_down;
-                std::this_thread::sleep_for(std::chrono::milliseconds(25));
-            }
-        });
+    AlternateScreen() {
+        output_ = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (output_ != INVALID_HANDLE_VALUE && GetConsoleMode(output_, &mode_)) {
+            SetConsoleMode(output_, mode_ | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+        input_ = GetStdHandle(STD_INPUT_HANDLE);
+        if (input_ != INVALID_HANDLE_VALUE && GetConsoleMode(input_, &input_mode_)) {
+            DWORD interactive_mode = input_mode_ | ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT;
+            interactive_mode &= ~ENABLE_QUICK_EDIT_MODE;
+            SetConsoleMode(input_, interactive_mode);
+            input_mode_changed_ = true;
+        }
+        std::cout << "\x1b[?1049h\x1b[2J\x1b[H" << std::flush;
     }
-
-    ~RequestCancellationWatcher() {
-        watcher_.request_stop();
-        if (watcher_.joinable()) watcher_.join();
-        active_cancel_flag.store(nullptr, std::memory_order_release);
+    ~AlternateScreen() {
+        std::cout << reset << "\x1b[?25h\x1b[?1049l" << std::flush;
+        if (output_ != INVALID_HANDLE_VALUE) SetConsoleMode(output_, mode_);
+        if (input_mode_changed_) SetConsoleMode(input_, input_mode_);
     }
-
-    RequestCancellationWatcher(const RequestCancellationWatcher&) = delete;
-    RequestCancellationWatcher& operator=(const RequestCancellationWatcher&) = delete;
-
 private:
-    std::atomic_bool& cancel_requested_;
-    arn::ApiClient& client_;
-    std::jthread watcher_;
+    HANDLE output_{INVALID_HANDLE_VALUE};
+    HANDLE input_{INVALID_HANDLE_VALUE};
+    DWORD mode_{};
+    DWORD input_mode_{};
+    bool input_mode_changed_{};
 };
-
-void enable_ansi_colors() {
-    const auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD mode = 0;
-    if (handle != INVALID_HANDLE_VALUE && GetConsoleMode(handle, &mode)) {
-        SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-    }
-}
-
-void clear_console_viewport() {
-    const auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
-    CONSOLE_SCREEN_BUFFER_INFO info{};
-    if (handle == INVALID_HANDLE_VALUE || !GetConsoleScreenBufferInfo(handle, &info)) {
-        return;
-    }
-
-    // Do not use ANSI clear/home here. Windows Terminal can deliver resize
-    // events while it is reflowing scrollback, which may leave the old card
-    // visible. Clearing through the Console API is deterministic.
-    DWORD written = 0;
-    const DWORD cell_count = static_cast<DWORD>(info.dwSize.X) * static_cast<DWORD>(info.dwSize.Y);
-    FillConsoleOutputCharacterW(handle, L' ', cell_count, {0, 0}, &written);
-    FillConsoleOutputAttribute(handle, info.wAttributes, cell_count, {0, 0}, &written);
-    SetConsoleCursorPosition(handle, {0, 0});
-}
-
-std::size_t console_width() {
-    CONSOLE_SCREEN_BUFFER_INFO info{};
-    const auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (handle != INVALID_HANDLE_VALUE && GetConsoleScreenBufferInfo(handle, &info)) {
-        return static_cast<std::size_t>(info.srWindow.Right - info.srWindow.Left + 1);
-    }
-    return 100;
-}
-
-void write_console_at(HANDLE handle, COORD position, std::wstring_view text, WORD color) {
-    SetConsoleCursorPosition(handle, position);
-    SetConsoleTextAttribute(handle, color);
-    DWORD written = 0;
-    WriteConsoleW(handle, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
-}
-
-void write_orange_console_at(HANDLE handle, COORD position, std::wstring_view text) {
-    SetConsoleCursorPosition(handle, position);
-    // The 16-colour Windows Console palette has no real orange. Use an ANSI
-    // 256-colour escape only for Arny, with the normal console palette as the
-    // fallback for older terminals.
-    std::cout << crab_orange << std::flush;
-    DWORD written = 0;
-    WriteConsoleW(handle, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
-    std::cout << reset << std::flush;
-}
-
-void write_panel_text(HANDLE handle, SHORT left, SHORT right, SHORT row, SHORT column,
-                      std::wstring_view text, WORD color) {
-    const SHORT x = static_cast<SHORT>(left + column);
-    if (x >= right) return;
-    const auto capacity = static_cast<std::size_t>(right - x);
-    write_console_at(handle, {x, row}, text.substr(0, capacity), color);
-}
-
-void print_welcome() {
-    std::cout.flush();
-    const auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
-    CONSOLE_SCREEN_BUFFER_INFO info{};
-    if (handle == INVALID_HANDLE_VALUE || !GetConsoleScreenBufferInfo(handle, &info)) {
-        std::cout << "ARN AGENT CODE — type /help for commands\n";
-        return;
-    }
-
-    // Measure the visible viewport, not the underlying scrollback buffer.
-    // Leaving two columns on each side prevents Windows Terminal from wrapping
-    // the final border cell.
-    const SHORT left = static_cast<SHORT>(info.srWindow.Left + 2);
-    const SHORT top = static_cast<SHORT>(info.dwCursorPosition.Y + 1);
-    const SHORT right = static_cast<SHORT>(info.srWindow.Right - 2);
-    const SHORT width = static_cast<SHORT>(right - left + 1);
-    if (width < 34) {
-        std::cout << "ARN AGENT CODE — type /help for commands\n";
-        return;
-    }
-    const bool compact = width < 78;
-    const SHORT height = compact ? 8 : 10;
-    const WORD cyan_color = FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
-    const WORD amber_color = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
-    const WORD dim_color = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
-    const WORD normal_color = info.wAttributes;
-    const std::wstring horizontal(static_cast<std::size_t>(width - 2), L'─');
-
-    // Clear the full card first. This prevents stale terminal glyphs from
-    // remaining inside the border after a resize or a redraw.
-    for (SHORT row = 0; row < height; ++row) {
-        DWORD written = 0;
-        FillConsoleOutputCharacterW(handle, L' ', width, {left, static_cast<SHORT>(top + row)}, &written);
-    }
-
-    write_console_at(handle, {left, top}, L"╭" + horizontal + L"╮", cyan_color);
-    write_console_at(handle, {left, static_cast<SHORT>(top + height - 1)}, L"╰" + horizontal + L"╯", cyan_color);
-    for (SHORT row = 1; row < height - 1; ++row) {
-        write_console_at(handle, {left, static_cast<SHORT>(top + row)}, L"│", cyan_color);
-        write_console_at(handle, {right, static_cast<SHORT>(top + row)}, L"│", cyan_color);
-    }
-
-    write_panel_text(handle, left, right, static_cast<SHORT>(top + 1), 2, L"ARN AGENT CODE", cyan_color);
-    if (compact) {
-        write_panel_text(handle, left, right, static_cast<SHORT>(top + 2), 2, L"Arny · native CLI coding companion", amber_color);
-        write_panel_text(handle, left, right, static_cast<SHORT>(top + 3), 2, L"Type / for hints · /help for all commands", dim_color);
-        write_panel_text(handle, left, right, static_cast<SHORT>(top + 4), 2, L"Tab completes commands · keys stay in memory", dim_color);
-        write_panel_text(handle, left, right, static_cast<SHORT>(top + 6), 2, L"Connect: /key-gemini <key> or /key-deepseek <key>", dim_color);
-    } else {
-        // Arny is a compact orange crab. Adjacent block elements form one
-        // continuous pixel shape, without the gaps caused by emoji squares.
-        write_orange_console_at(handle, {static_cast<SHORT>(left + 3), static_cast<SHORT>(top + 3)},
-                                L"▄▄          ▄▄");
-        write_orange_console_at(handle, {static_cast<SHORT>(left + 3), static_cast<SHORT>(top + 4)},
-                                L"▄▀██▄▀██▀▄██▀▄");
-        write_orange_console_at(handle, {static_cast<SHORT>(left + 3), static_cast<SHORT>(top + 5)},
-                                L"   ▀██████▀");
-        write_orange_console_at(handle, {static_cast<SHORT>(left + 3), static_cast<SHORT>(top + 6)},
-                                L"    ▄▀▀▀▀▄");
-        constexpr SHORT text_column = 30;
-        write_panel_text(handle, left, right, static_cast<SHORT>(top + 3), text_column, L"Arny · your coding companion", amber_color);
-        write_panel_text(handle, left, right, static_cast<SHORT>(top + 4), text_column, L"Native CLI · bring your own model", normal_color);
-        write_panel_text(handle, left, right, static_cast<SHORT>(top + 5), text_column, L"Keys stay in memory, never on disk", normal_color);
-        write_panel_text(handle, left, right, static_cast<SHORT>(top + 6), text_column, L"Type / for live hints · /help for all commands", dim_color);
-        write_panel_text(handle, left, right, static_cast<SHORT>(top + 7), text_column, L"Press Tab to complete a command", dim_color);
-        write_panel_text(handle, left, right, static_cast<SHORT>(top + 8), 2,
-                         L"Connect: /key-gemini <key>  or  /key-deepseek <key>", dim_color);
-    }
-
-    SetConsoleTextAttribute(handle, normal_color);
-    SetConsoleCursorPosition(handle, {0, static_cast<SHORT>(top + height + 1)});
-}
 
 std::string trim(std::string text) {
     const auto first = text.find_first_not_of(" \t");
-    if (first == std::string::npos) return {};
-    return text.substr(first, text.find_last_not_of(" \t") - first + 1);
+    return first == std::string::npos ? "" : text.substr(first, text.find_last_not_of(" \t") - first + 1);
 }
 
 std::string lower_ascii(std::string text) {
-    std::ranges::transform(text, text.begin(), [](unsigned char value) {
-        return static_cast<char>(std::tolower(value));
-    });
+    std::ranges::transform(text, text.begin(), [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
     return text;
 }
 
 std::string remove_quotes(std::string text) {
     text = trim(std::move(text));
-    return text.size() >= 2 && text.front() == '"' && text.back() == '"'
-        ? text.substr(1, text.size() - 2) : text;
-}
-
-void print_models(const std::vector<std::string>& models) {
-    std::cout << cyan << "Available models" << reset << "\n";
-    for (const auto& model : models) std::cout << "  " << amber << "•" << reset << " " << model << '\n';
-}
-
-void print_help() {
-    std::cout << '\n' << cyan << "Commands" << reset << "\n"
-              << amber << "  /key-gemini <key>" << reset << "       Connect Gemini and show available models\n"
-              << amber << "  /key-deepseek <key>" << reset << "     Connect DeepSeek and show available models\n"
-              << amber << "  /model <name>" << reset << "           Select an available model\n"
-              << amber << "  /models" << reset << "                 Show models for the active key\n"
-              << amber << "  /provider <name>" << reset << "        Switch provider and reset this session\n"
-              << amber << "  /status" << reset << "                 Show provider, model, and key status\n"
-              << amber << "  /clear-session" << reset << "          Forget this chat's context\n"
-              << amber << "  Esc / Ctrl+C" << reset << "                 Cancel the current model request\n"
-              << amber << "  /clear" << reset << "                  Redraw the welcome screen\n"
-              << amber << "  /exit" << reset << "                   End the session\n\n"
-              << dim << "Write a normal message to ask the selected model. ARN can read project files automatically; "
-              << "file changes always ask first. Keys live only until /exit.\n\n" << reset;
+    return text.size() >= 2 && text.front() == '"' && text.back() == '"' ? text.substr(1, text.size() - 2) : text;
 }
 
 std::string to_utf8(const std::wstring& text) {
     if (text.empty()) return {};
-    const auto length = static_cast<int>(text.size());
-    const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), length, nullptr, 0, nullptr, nullptr);
-    std::string result(size, '\0');
-    WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), length, result.data(), size, nullptr, nullptr);
+    const int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    std::string result(count, '\0');
+    WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), result.data(), count, nullptr, nullptr);
     return result;
 }
 
-constexpr std::array command_hints{
-    std::pair{"/key-gemini", "connect Gemini"},
-    std::pair{"/key-deepseek", "connect DeepSeek"},
-    std::pair{"/model", "choose a model"},
-    std::pair{"/models", "list available models"},
-    std::pair{"/provider", "switch provider"},
-    std::pair{"/status", "show session status"},
-    std::pair{"/clear-session", "forget chat context"},
-    std::pair{"/help", "show all commands"},
-    std::pair{"/clear", "redraw welcome"},
-    std::pair{"/exit", "leave arn"},
+std::size_t char_bytes(unsigned char byte) {
+    if ((byte & 0x80) == 0) return 1;
+    if ((byte & 0xE0) == 0xC0) return 2;
+    if ((byte & 0xF0) == 0xE0) return 3;
+    if ((byte & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+std::size_t display_columns(std::string_view text) {
+    std::size_t columns = 0;
+    for (std::size_t index = 0; index < text.size();) {
+        index += std::min(char_bytes(static_cast<unsigned char>(text[index])), text.size() - index);
+        ++columns;
+    }
+    return columns;
+}
+
+std::vector<std::string> wrap(std::string_view text, std::size_t width) {
+    std::vector<std::string> output;
+    std::string line;
+    std::size_t columns = 0;
+    for (std::size_t index = 0; index < text.size();) {
+        if (text[index] == '\n') { output.push_back(std::move(line)); line.clear(); columns = 0; ++index; continue; }
+        const auto count = std::min(char_bytes(static_cast<unsigned char>(text[index])), text.size() - index);
+        if (columns == width) { output.push_back(std::move(line)); line.clear(); columns = 0; }
+        line.append(text.substr(index, count));
+        index += count;
+        ++columns;
+    }
+    if (!line.empty() || output.empty()) output.push_back(std::move(line));
+    return output;
+}
+
+std::string horizontal_rule(std::size_t cells) {
+    std::string result;
+    result.reserve(cells * 3);
+    for (std::size_t index = 0; index < cells; ++index) result += "─";
+    return result;
+}
+
+enum class Tone { normal, user, muted, good, warning, error };
+struct Entry { Tone tone; std::string text; };
+
+class Ui {
+public:
+    void add(Tone tone, std::string text) {
+        log_.push_back({tone, std::move(text)});
+        if (log_.size() > 180) log_.erase(log_.begin(), log_.begin() + 20);
+        scroll_offset_ = 0;
+    }
+    void append(std::string_view text) { if (log_.empty()) add(Tone::normal, {}); log_.back().text.append(text); scroll_offset_ = 0; }
+    void clear() { log_.clear(); scroll_offset_ = 0; }
+    void input(std::string value) { input_ = std::move(value); }
+    void hint(std::string value) { hint_ = std::move(value); }
+    void status(std::string value) { status_ = std::move(value); }
+    void session(arn::Provider provider, const std::string& model, bool context) {
+        provider_ = arn::provider_name(provider); model_ = model; context_ = context;
+    }
+
+    void scroll(int amount) {
+        const auto [width, height] = dimensions();
+        if (width < 38 || height < 13) return;
+        const int inner = width - 4;
+        const int header = inner < 58 ? 5 : inner < 76 ? 7 : 9;
+        const int visible_rows = std::max(0, height - 3 - (header + 2));
+        std::size_t total_rows = 0;
+        for (const auto& entry : log_) total_rows += wrap(entry.text, static_cast<std::size_t>(inner - 2)).size();
+        const auto maximum = total_rows > static_cast<std::size_t>(visible_rows)
+            ? total_rows - static_cast<std::size_t>(visible_rows) : 0;
+        if (amount > 0) scroll_offset_ = std::min(maximum, scroll_offset_ + static_cast<std::size_t>(amount));
+        else scroll_offset_ = static_cast<std::size_t>(std::max<std::ptrdiff_t>(0, static_cast<std::ptrdiff_t>(scroll_offset_) + amount));
+    }
+
+    void scroll_to_bottom() { scroll_offset_ = 0; }
+
+    void render() const {
+        const auto [width, height] = dimensions();
+        std::cout << "\x1b[?2026h\x1b[?25l\x1b[2J\x1b[H";
+        if (width < 38 || height < 13) {
+            std::cout << cyan << "ARN" << reset << " — enlarge terminal\x1b[?25h\x1b[?2026l" << std::flush;
+            return;
+        }
+        const int left = 2, inner = width - 4, header = inner < 58 ? 5 : inner < 76 ? 7 : 9;
+        header_box(left, inner, header);
+        const int content_top = header + 2, footer = height - 3, rows = std::max(0, footer - content_top);
+        std::vector<Entry> lines;
+        for (const auto& entry : log_) for (auto line : wrap(entry.text, static_cast<std::size_t>(inner - 2))) lines.push_back({entry.tone, std::move(line)});
+        const std::size_t bottom = lines.size() > static_cast<std::size_t>(rows) ? lines.size() - static_cast<std::size_t>(rows) : 0;
+        const std::size_t start = bottom > scroll_offset_ ? bottom - scroll_offset_ : 0;
+        for (int row = 0; row < rows; ++row) if (start + row < lines.size()) at(content_top + row, left, color(lines[start + row].tone) + lines[start + row].text + std::string(reset));
+        at(footer, 1, std::string(dim) + horizontal_rule(static_cast<std::size_t>(width - 2)) + std::string(reset));
+        at(footer + 1, 1, std::string(cyan) + "arn" + std::string(amber) + " › " + std::string(reset) + input_);
+        const auto footer_hint = current_hint();
+        at(footer + 2, 1, std::string(dim) + footer_hint + std::string(reset));
+        place_cursor(footer, width);
+        std::cout << "\x1b[?25h\x1b[?2026l" << std::flush;
+    }
+
+    void render_input() const {
+        const auto [width, height] = dimensions();
+        if (width < 38 || height < 13) { render(); return; }
+        const int footer = height - 3;
+        const auto footer_hint = current_hint();
+        std::cout << "\x1b[?2026h\x1b[?25l";
+        clear_line(footer + 1);
+        std::cout << cyan << "arn" << amber << " › " << reset << input_;
+        clear_line(footer + 2);
+        std::cout << dim << footer_hint << reset;
+        place_cursor(footer, width);
+        std::cout << "\x1b[?25h\x1b[?2026l" << std::flush;
+    }
+
+private:
+    static std::pair<int, int> dimensions() {
+        CONSOLE_SCREEN_BUFFER_INFO info{};
+        if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info)) return {info.srWindow.Right - info.srWindow.Left + 1, info.srWindow.Bottom - info.srWindow.Top + 1};
+        return {100, 30};
+    }
+    // render() clears the screen once before drawing. Clearing each individual
+    // cell would erase content that was drawn earlier on the same row.
+    static void at(int row, int column, const std::string& text) { std::cout << "\x1b[" << row << ';' << column << "H" << text; }
+    static void clear_line(int row) { std::cout << "\x1b[" << row << ";1H\x1b[2K"; }
+    std::string current_hint() const {
+        if (scroll_offset_ != 0) return "Scrolled up · Wheel down or End returns to the latest message · Shift+drag selects text";
+        return hint_.empty() ? status_ : hint_;
+    }
+    void place_cursor(int footer, int width) const {
+        std::cout << "\x1b[" << footer + 1 << ';'
+                  << std::min(width - 1, 7 + static_cast<int>(display_columns(input_))) << 'H';
+    }
+    static std::string color(Tone tone) {
+        switch (tone) {
+        case Tone::user: return std::string(cyan);
+        case Tone::muted: return std::string(dim);
+        case Tone::good: return std::string(green);
+        case Tone::warning: return std::string(amber);
+        case Tone::error: return std::string(red);
+        default: return std::string(reset);
+        }
+    }
+    void header_box(int left, int width, int height) const {
+        const std::string rule = horizontal_rule(static_cast<std::size_t>(width - 2));
+        at(1, left, std::string(cyan) + "╭" + rule + "╮" + std::string(reset));
+        for (int row = 2; row < height; ++row) { at(row, left, std::string(cyan) + "│" + std::string(reset)); at(row, left + width - 1, std::string(cyan) + "│" + std::string(reset)); }
+        at(height, left, std::string(cyan) + "╰" + rule + "╯" + std::string(reset));
+        at(2, left + 2, std::string(cyan) + "ARN AGENT CODE" + std::string(reset));
+        if (height == 5) {
+            at(3, left + 2, std::string(amber) + "Arny · native coding companion" + std::string(reset));
+        } else if (height == 7) {
+            at(3, left + 2, std::string(amber) + "Arny · native coding companion" + std::string(reset));
+            at(4, left + 2, std::string(dim) + "Gemini / DeepSeek · streaming · safe file tools" + std::string(reset));
+            at(5, left + 2, std::string(dim) + "Esc cancels · keys and context stay in memory" + std::string(reset));
+        } else {
+            at(4, left + 3, std::string(orange) + "▄▄          ▄▄" + std::string(reset));
+            at(5, left + 3, std::string(orange) + "▄▀██▄▀██▀▄██▀▄" + std::string(reset));
+            at(6, left + 3, std::string(orange) + "   ▀██████▀" + std::string(reset));
+            at(7, left + 3, std::string(orange) + "    ▄▀▀▀▀▄" + std::string(reset));
+            at(4, left + 30, std::string(amber) + "Arny · your coding companion" + std::string(reset));
+            at(5, left + 30, "Native CLI · bring your own model");
+            at(6, left + 30, "Streaming replies · safe local file tools");
+            at(7, left + 30, std::string(dim) + "Esc cancels · keys and context stay in memory" + std::string(reset));
+        }
+        if (height > 5) {
+            at(height - 1, left + 2, std::string(dim) + "Provider: " + provider_ + " · Model: " + (model_.empty() ? "not selected" : model_) + " · Context: " + (context_ ? "active" : "empty") + std::string(reset));
+        }
+    }
+    std::vector<Entry> log_;
+    std::string input_, hint_, status_{"Type /help for commands"}, provider_{"none"}, model_;
+    std::size_t scroll_offset_{};
+    bool context_{};
 };
 
-std::vector<std::pair<std::string_view, std::string_view>> matching_commands(const std::wstring& buffer) {
-    const auto typed = to_utf8(buffer);
-    if (!typed.starts_with('/') || typed.find_first_of(" \t") != std::string::npos) return {};
-    std::vector<std::pair<std::string_view, std::string_view>> matches;
-    for (const auto& command : command_hints) {
-        if (std::string_view(command.first).starts_with(typed)) {
-            matches.emplace_back(command.first, command.second);
-        }
-    }
-    return matches;
-}
-
-void draw_suggestions(const std::wstring& buffer) {
-    const auto matches = matching_commands(buffer);
-    // Reserve exactly one line under the prompt. Explicit cursor motion works
-    // reliably in Windows Terminal, unlike the save/restore cursor sequences.
-    std::cout << "\n\x1b[2K\r";
-    if (!matches.empty()) {
-        std::cout << dim << "  " << reset;
-        for (std::size_t index = 0; index < std::min<std::size_t>(matches.size(), 3); ++index) {
-            if (index != 0) std::cout << dim << "  ·  " << reset;
-            std::cout << amber << matches[index].first << reset << dim << " " << matches[index].second << reset;
-        }
-        if (matches.size() > 3) std::cout << dim << "  …" << reset;
-    }
-    std::cout << "\x1b[1A\r\x1b[2K" << cyan << "arn" << amber << " › " << reset
-              << to_utf8(buffer) << std::flush;
-}
-
-void redraw_input(const std::wstring& buffer) {
-    std::cout << "\r\x1b[2K" << cyan << "arn" << amber << " › " << reset << to_utf8(buffer);
-    draw_suggestions(buffer);
-}
-
-std::string read_command_line() {
-    std::wstring buffer;
-    const auto input_handle = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD input_mode = 0;
-    if (input_handle != INVALID_HANDLE_VALUE && GetConsoleMode(input_handle, &input_mode)) {
-        SetConsoleMode(input_handle, input_mode | ENABLE_WINDOW_INPUT);
-    }
-
-    for (;;) {
-        INPUT_RECORD record{};
-        DWORD events_read = 0;
-        if (input_handle == INVALID_HANDLE_VALUE ||
-            !ReadConsoleInputW(input_handle, &record, 1, &events_read)) {
-            return {};
-        }
-
-        if (record.EventType == WINDOW_BUFFER_SIZE_EVENT) {
-            // Terminal reflow cannot preserve an absolute-position card. Redraw
-            // the small UI from scratch using the new viewport dimensions.
-            clear_console_viewport();
-            print_welcome();
-            redraw_input(buffer);
-            continue;
-        }
-        if (record.EventType != KEY_EVENT || !record.Event.KeyEvent.bKeyDown) continue;
-
-        const auto& key_event = record.Event.KeyEvent;
-        const wchar_t key = key_event.uChar.UnicodeChar;
-        if (key == L'\r') {
-            // The line below the prompt is reserved for live suggestions.
-            // Clear it before handing the terminal to the command result.
-            std::cout << "\n\x1b[2K\r";
-            return to_utf8(buffer);
-        }
-        if (key == L'\b' || key_event.wVirtualKeyCode == VK_BACK) {
-            if (!buffer.empty()) buffer.pop_back();
-            redraw_input(buffer);
-            continue;
-        }
-        if (key == L'\t' || key_event.wVirtualKeyCode == VK_TAB) {
-            const auto matches = matching_commands(buffer);
-            if (!matches.empty()) {
-                buffer = std::wstring(matches.front().first.begin(), matches.front().first.end());
-                buffer += L' ';
+class CancellationWatcher {
+public:
+    CancellationWatcher(std::atomic_bool& cancelled, arn::ApiClient& client) : cancelled_(cancelled), client_(client) {
+        active_cancel_flag.store(&cancelled_, std::memory_order_release);
+        thread_ = std::jthread([this](std::stop_token stop) {
+            bool previous = false;
+            while (!stop.stop_requested()) {
+                const bool escape = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+                if ((escape && !previous) || cancelled_.load(std::memory_order_relaxed)) { cancelled_.store(true, std::memory_order_relaxed); client_.cancel_active_request(); return; }
+                previous = escape;
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
             }
-            redraw_input(buffer);
+        });
+    }
+    ~CancellationWatcher() { thread_.request_stop(); if (thread_.joinable()) thread_.join(); active_cancel_flag.store(nullptr, std::memory_order_release); }
+private:
+    std::atomic_bool& cancelled_; arn::ApiClient& client_; std::jthread thread_;
+};
+
+constexpr std::array command_hints{"/key-gemini", "/key-deepseek", "/model", "/models", "/provider", "/status", "/clear-session", "/clear", "/help", "/exit"};
+
+std::string input_hint(std::string_view input) {
+    if (!input.starts_with('/') || input.find_first_of(" \t") != std::string_view::npos) {
+        return "Type /help for commands · Esc cancels a request";
+    }
+    std::string result;
+    for (const auto command : command_hints) {
+        if (!std::string_view(command).starts_with(input)) continue;
+        if (!result.empty()) result += "  ·  ";
+        result += command;
+        if (result.size() > 96) { result += "  …"; break; }
+    }
+    return result.empty() ? "Unknown command · Type /help" : result + "   Tab completes";
+}
+
+std::string normalize_command(std::string input) {
+    if (input.empty() || input.front() == '/') return input;
+    const auto separator = input.find_first_of(" \t");
+    const auto first_word = lower_ascii(input.substr(0, separator));
+    for (const auto command : command_hints) {
+        if (first_word == std::string_view(command).substr(1)) return '/' + input;
+    }
+    if (first_word == "quit") return '/' + input;
+    return input;
+}
+
+std::string preferred_model(arn::Provider provider, const std::vector<std::string>& models) {
+    const std::vector<std::string_view> preferred = provider == arn::Provider::gemini
+        ? std::vector<std::string_view>{"gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.1-flash", "gemini-2.5-flash"}
+        : std::vector<std::string_view>{"deepseek-chat", "deepseek-reasoner"};
+    for (const auto candidate : preferred) {
+        if (std::ranges::find(models, candidate) != models.end()) return std::string(candidate);
+    }
+    if (provider == arn::Provider::gemini) {
+        for (const auto& candidate : models) {
+            const auto name = lower_ascii(candidate);
+            if (name.find("gemini") != std::string::npos && name.find("flash") != std::string::npos
+                && name.find("image") == std::string::npos && name.find("tts") == std::string::npos
+                && name.find("transcribe") == std::string::npos) return candidate;
+        }
+    }
+    return models.empty() ? std::string{} : models.front();
+}
+
+std::string read_line(Ui& ui) {
+    std::wstring buffer;
+    const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    for (;;) {
+        INPUT_RECORD event{}; DWORD count{};
+        if (input == INVALID_HANDLE_VALUE || !ReadConsoleInputW(input, &event, 1, &count)) return {};
+        if (event.EventType == WINDOW_BUFFER_SIZE_EVENT) { ui.render(); continue; }
+        if (event.EventType == MOUSE_EVENT) {
+            const auto& mouse = event.Event.MouseEvent;
+            if (mouse.dwEventFlags == MOUSE_WHEELED) {
+                const auto delta = static_cast<SHORT>(HIWORD(mouse.dwButtonState));
+                ui.scroll(delta > 0 ? 3 : -3);
+                ui.render();
+            }
             continue;
         }
-        if (key >= L' ') {
-            buffer += key;
-            redraw_input(buffer);
-        }
+        if (event.EventType != KEY_EVENT || !event.Event.KeyEvent.bKeyDown) continue;
+        const auto& key = event.Event.KeyEvent;
+        if (key.wVirtualKeyCode == VK_PRIOR) { ui.scroll(8); ui.render(); continue; }
+        if (key.wVirtualKeyCode == VK_NEXT) { ui.scroll(-8); ui.render(); continue; }
+        if (key.wVirtualKeyCode == VK_END) { ui.scroll_to_bottom(); ui.render(); continue; }
+        if (key.uChar.UnicodeChar == L'\r') { ui.input({}); ui.hint({}); return to_utf8(buffer); }
+        if (key.uChar.UnicodeChar == 3) continue;
+        if (key.wVirtualKeyCode == VK_BACK) { if (!buffer.empty()) buffer.pop_back(); }
+        else if (key.wVirtualKeyCode == VK_TAB) {
+            const auto prefix = to_utf8(buffer);
+            for (const auto hint : command_hints) if (std::string_view(hint).starts_with(prefix)) { buffer.assign(hint, hint + std::char_traits<char>::length(hint)); buffer += L' '; break; }
+        } else if (key.uChar.UnicodeChar >= L' ') buffer += key.uChar.UnicodeChar;
+        const auto current_input = to_utf8(buffer);
+        ui.input(current_input);
+        ui.hint(input_hint(current_input));
+        ui.render_input();
     }
 }
 
-bool confirm_tool_change(const arn::ToolRequest& request) {
-    std::cout << '\n' << amber << "Arny wants to change files: " << reset << request.summary << "\n"
-              << dim << "Allow this action? [y/N]: " << reset << std::flush;
-    std::string answer;
-    std::getline(std::cin, answer);
-    answer = lower_ascii(trim(std::move(answer)));
-    return answer == "y" || answer == "yes";
-}
+arn::Provider provider_from_name(const std::string& value) { return value == "gemini" ? arn::Provider::gemini : value == "deepseek" ? arn::Provider::deepseek : arn::Provider::none; }
 
-arn::Provider provider_from_name(const std::string& name) {
-    if (name == "deepseek") return arn::Provider::deepseek;
-    if (name == "gemini") return arn::Provider::gemini;
-    return arn::Provider::none;
-}
-
-template <typename Task>
-auto run_with_spinner(Task&& task) {
-    using namespace std::chrono_literals;
-
-    constexpr std::array frames{'|', '/', '-', '\\'};
-    auto result = std::async(std::launch::async, std::forward<Task>(task));
-    std::size_t frame = 0;
-
-    while (result.wait_for(100ms) != std::future_status::ready) {
-        std::cout << "\r" << cyan << "Arnie is thinking " << amber << frames[frame] << reset << std::flush;
-        frame = (frame + 1) % frames.size();
-    }
-
-    std::cout << "\r                          \r" << std::flush;
-    return result.get();
-}
-
-int run_interactive() {
+int run() {
+    AlternateScreen screen;
+    Ui ui;
     arn::ApiClient client;
     const arn::ToolExecutor tools;
     arn::Provider provider = arn::Provider::none;
-    std::string api_key;
+    std::string key, model;
     std::vector<std::string> models;
-    std::string model;
-
-    print_welcome();
-    for (std::string input; ; ) {
-        std::cout << cyan << "arn" << amber << " › " << reset;
-        input = read_command_line();
-        input = trim(std::move(input));
-        if (input.empty()) continue;
-
+    const auto refresh = [&] { ui.session(provider, model, client.session_entries() != 0); ui.render(); };
+    const auto confirm = [&](const arn::ToolRequest& request) {
+        ui.status("Allow file change? " + request.summary + " [y/N]"); refresh();
+        const int answer = _getch(); ui.status("Type /help for commands"); return answer == 'y' || answer == 'Y';
+    };
+    refresh();
+    for (;;) {
+        const auto input = normalize_command(trim(read_line(ui)));
+        if (input.empty()) { refresh(); continue; }
+        ui.add(Tone::user, "arn › " + input);
         if (input.front() != '/') {
-            std::cout << dim << "Arnie is working…" << reset << std::flush;
-            bool printed_stream = false;
-            std::atomic_bool cancel_requested = false;
-            const auto stream_text = [&](std::string_view chunk) {
-                if (!printed_stream) {
-                    std::cout << "\r\x1b[2K\n";
-                    printed_stream = true;
-                }
-                std::cout << chunk << std::flush;
-            };
-            RequestCancellationWatcher cancellation_watcher(cancel_requested, client);
-            const auto result = client.submit_prompt(provider, api_key, model, input, tools, confirm_tool_change,
-                                                      stream_text, &cancel_requested);
-            std::cout << "\r\x1b[2K" << std::flush;
-            if (result.cancelled) {
-                if (printed_stream) std::cout << '\n';
-                std::cout << amber << "Request cancelled." << reset << "\n\n";
-            } else if (result.ok) {
-                if (printed_stream) {
-                    std::cout << "\n\n";
-                } else {
-                    std::cout << '\n' << result.message << "\n\n";
-                }
-            } else {
-                if (printed_stream) std::cout << '\n';
-                std::cout << red << "Error: " << reset << result.message << "\n\n";
-            }
-            continue;
+            ui.add(Tone::normal, {}); ui.status("Arnie is working… Esc or Ctrl+C cancels"); refresh();
+            std::atomic_bool cancelled = false;
+            CancellationWatcher watcher(cancelled, client);
+            const auto result = client.submit_prompt(provider, key, model, input, tools, confirm, [&](std::string_view text) { ui.append(text); refresh(); }, &cancelled);
+            if (result.cancelled) ui.add(Tone::warning, "Request cancelled.");
+            else if (!result.ok) ui.add(Tone::error, "Error: " + result.message);
+            else if (result.message.empty()) ui.add(Tone::muted, "Done.");
+            ui.status("Type /help for commands"); refresh(); continue;
         }
-
         const auto separator = input.find_first_of(" \t");
         const auto command = lower_ascii(input.substr(0, separator));
         const auto argument = separator == std::string::npos ? "" : trim(input.substr(separator + 1));
-
-        if (command == "/help") {
-            print_help();
-        } else if (command == "/exit" || command == "/quit") {
-            return 0;
-        } else if (command == "/clear") {
-            clear_console_viewport();
-            print_welcome();
-        } else if (command == "/status") {
-            std::cout << "Provider: " << arn::provider_name(provider) << "\n"
-                      << "Model: " << (model.empty() ? "not selected" : model) << "\n"
-                      << "API key: " << (api_key.empty() ? "not set" : "set for this session") << "\n"
-                      << "Chat context: " << (client.session_entries() == 0 ? "empty" : "active") << "\n";
-        } else if (command == "/clear-session") {
-            client.reset_session();
-            std::cout << green << "✓ " << reset << "Chat context cleared. Your key and model are unchanged.\n";
-        } else if (command == "/models") {
-            if (models.empty()) std::cout << "No verified API key is active.\n";
-            else print_models(models);
-        } else if (command == "/provider") {
+        if (command == "/exit" || command == "/quit") return 0;
+        if (command == "/clear") ui.clear();
+        else if (command == "/help") ui.add(Tone::muted, "Commands: /key-gemini <key>, /key-deepseek <key>, /model <name>, /models, /provider <name>, /status, /clear-session, /clear, /exit");
+        else if (command == "/status") ui.add(Tone::normal, "Provider: " + arn::provider_name(provider) + " | Model: " + (model.empty() ? "not selected" : model) + " | API key: " + (key.empty() ? "not set" : "set") + " | Context: " + (client.session_entries() ? "active" : "empty"));
+        else if (command == "/clear-session") { client.reset_session(); ui.add(Tone::good, "Chat context cleared. Key and model are unchanged."); }
+        else if (command == "/models") { if (models.empty()) ui.add(Tone::warning, "No verified API key is active."); else for (const auto& name : models) ui.add(Tone::normal, "• " + name); }
+        else if (command == "/provider") {
             const auto selected = provider_from_name(lower_ascii(argument));
-            if (selected == arn::Provider::none) {
-                std::cout << "Supported providers: deepseek, gemini\n";
-            } else {
-                provider = selected;
-                api_key.clear();
-                models.clear();
-                model.clear();
-                client.reset_session();
-                std::cout << green << "✓ " << reset << "Active provider: " << arn::provider_name(provider) << "\n";
-            }
-        } else if (command == "/key-deepseek" || command == "/key-gemini") {
-            const auto selected = command == "/key-deepseek" ? arn::Provider::deepseek : arn::Provider::gemini;
-            const auto candidate = remove_quotes(argument);
-            const auto result = run_with_spinner([&] {
-                return client.list_models(selected, candidate);
-            });
-            if (!result.ok) {
-                std::cout << red << "✗ " << reset << "Key was not saved: " << result.message << "\n";
-            } else if (result.models.empty()) {
-                std::cout << "Key was not saved: no text-generation models are available.\n";
-            } else {
-                provider = selected;
-                api_key = candidate;
-                models = result.models;
-                model = models.front();
-                client.reset_session();
-                std::cout << green << "✓ " << reset << result.message << " Default model: " << amber << model << reset << "\n";
-                print_models(models);
-                std::cout << "Use /model <name> to choose another model.\n";
-            }
+            if (selected == arn::Provider::none) ui.add(Tone::warning, "Supported providers: gemini, deepseek");
+            else { provider = selected; key.clear(); model.clear(); models.clear(); client.reset_session(); ui.add(Tone::good, "Active provider: " + arn::provider_name(provider)); }
+        } else if (command == "/key-gemini" || command == "/key-deepseek") {
+            const auto selected = command == "/key-gemini" ? arn::Provider::gemini : arn::Provider::deepseek;
+            ui.status("Verifying API key…"); refresh();
+            const auto result = client.list_models(selected, remove_quotes(argument));
+            if (!result.ok || result.models.empty()) ui.add(Tone::error, "Key was not saved: " + (result.ok ? "no text-generation models are available." : result.message));
+            else { provider = selected; key = remove_quotes(argument); models = result.models; model = preferred_model(provider, models); client.reset_session(); ui.add(Tone::good, "Connected to " + arn::provider_name(provider) + ". Default model: " + model); }
         } else if (command == "/model") {
             const auto selected = remove_quotes(argument);
-            if (std::ranges::find(models, selected) == models.end()) {
-                std::cout << "That model is not in the active provider's list. Use /models.\n";
-            } else {
-                client.reset_session();
-                model = selected;
-                std::cout << green << "✓ " << reset << "Active model: " << amber << model << reset << "\n";
-            }
-        } else {
-            std::cout << "Unknown command. Type /help for commands.\n";
-        }
+            if (std::ranges::find(models, selected) == models.end()) ui.add(Tone::warning, "That model is not in the active provider list. Use /models.");
+            else { model = selected; client.reset_session(); ui.add(Tone::good, "Active model: " + model); }
+        } else ui.add(Tone::error, "Unknown command. Type /help for commands.");
+        ui.status("Type /help for commands"); refresh();
     }
 }
 
 } // namespace
 
 int wmain() {
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
-    enable_ansi_colors();
-    SetConsoleCtrlHandler(handle_console_control, TRUE);
-    return run_interactive();
+    SetConsoleOutputCP(CP_UTF8); SetConsoleCP(CP_UTF8); SetConsoleCtrlHandler(handle_console_control, TRUE);
+    return run();
 }

@@ -12,6 +12,10 @@ Python, or a heavyweight runtime.
 
 - Native C++23 CLI executable: `arn`
 - Interactive shell with live `/` hints and Tab completion
+- Retained terminal UI: resize-safe transcript, adaptive layout, and a clean
+  return to the original PowerShell screen on exit
+- Mouse-wheel transcript scrolling, plus `Page Up`, `Page Down`, and `End`
+- Text selection with `Shift` + mouse drag and copying with `Ctrl+C`
 - Gemini and DeepSeek API support
 - Model discovery per API key and `/model` selection
 - API keys held only in process memory
@@ -57,6 +61,10 @@ Explain how this CMake project is organized.
 ```
 
 Use `/help` to view every available command.
+
+Long transcripts can be reviewed with the mouse wheel or `Page Up` and
+`Page Down`; press `End` to return to the latest message. Because ARN captures
+mouse input for scrolling, hold `Shift` while dragging to select terminal text.
 
 ### Install a Windows release
 
@@ -137,6 +145,6 @@ at `https://arnecto.github.io/arn/`.
 
 ## License
 
-No license has been selected yet. Until a `LICENSE` file is added, the source is
-not automatically available for reuse or redistribution. Before publishing,
-choose a license—for example MIT or Apache-2.0.
+ARN is available under the [MIT License](LICENSE). You may use, modify, and
+redistribute the project under the license terms; keep the included copyright
+and license notice with substantial copies of the software.
