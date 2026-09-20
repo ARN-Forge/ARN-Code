@@ -21,4 +21,4 @@ body:
   - type: input
     attributes:
       label: OS and compiler
-      placeholder: Windows 11, MSVC 19.xx
+      placeholder: Windows 11 / Ubuntu 24.04 / macOS 15, plus compiler version

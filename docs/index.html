@@ -33,14 +33,16 @@
     .grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:16px; }
     .card { padding:22px; background:linear-gradient(145deg, #102224, #0a1617); border:1px solid #1b484c; border-radius:10px; }
     .card .icon { color:var(--orange); font-size:1.35rem; } .card h3 { color:var(--amber); margin:10px 0 7px; font-size:1rem; } .card p { color:var(--muted); margin:0; font-size:.93rem; }
+    .install-grid { display:grid; grid-template-columns:repeat(2, 1fr); gap:16px; }
     .install { padding:25px; border:1px solid var(--line); border-radius:10px; background:#050a0b; }
+    .install h3 { color:var(--amber); margin:0 0 14px; }
     pre { overflow:auto; margin:0; color:#d5dfdf; white-space:pre-wrap; }
     .copy-note { color:var(--muted); font-size:.88rem; margin:14px 0 0; }
     .steps { counter-reset:steps; display:grid; gap:12px; padding:0; list-style:none; }
     .steps li { counter-increment:steps; padding:14px 14px 14px 52px; background:#0a1718; border-left:2px solid var(--cyan); position:relative; }
     .steps li::before { content:counter(steps); position:absolute; left:18px; color:var(--cyan); font-weight:bold; }
     footer { padding:40px 0 56px; color:var(--muted); font-size:.9rem; } footer a { color:var(--cyan); }
-    @media (max-width:760px) { .hero { grid-template-columns:1fr; padding:35px 0 58px; gap:24px; } .grid { grid-template-columns:1fr; } nav { font-size:.9rem; } }
+    @media (max-width:760px) { .hero { grid-template-columns:1fr; padding:35px 0 58px; gap:24px; } .grid, .install-grid { grid-template-columns:1fr; } nav { font-size:.9rem; } }
   </style>
 </head>
 <body>
@@ -57,7 +59,7 @@
           <h1>Bring your own model. Keep your flow.</h1>
           <p class="lead">ARN is a fast terminal companion for coding workflows. Connect Gemini or DeepSeek, give it a project folder, and review every file change before it happens.</p>
           <div class="actions">
-            <a class="button" href="#install">Install for Windows</a>
+            <a class="button" href="#install">Install ARN</a>
             <a class="button secondary" href="https://github.com/arnecto/arn/releases">View releases ↗</a>
           </div>
         </div>
@@ -80,15 +82,19 @@
           <article class="card"><div class="icon">✦</div><h3>Gemini + DeepSeek</h3><p>Choose a model per API key and keep a focused, in-memory conversation context.</p></article>
           <article class="card"><div class="icon">↯</div><h3>Streaming replies</h3><p>See the model response as it is generated instead of waiting for the whole answer.</p></article>
           <article class="card"><div class="icon">⌘</div><h3>Safe file tools</h3><p>Read, create, edit, and delete files only inside the launch folder—with confirmation for changes.</p></article>
+          <article class="card"><div class="icon">◎</div><h3>Windows, Linux, macOS</h3><p>Use the same terminal workflow on Windows x64, Linux x64, Apple Silicon, and Intel Macs.</p></article>
         </div>
       </section>
 
       <section id="install">
-        <div class="eyebrow">Windows</div>
+        <div class="eyebrow">Windows · Linux · macOS</div>
         <h2>Install from a terminal.</h2>
-        <p class="section-lead">Run this in PowerShell. It downloads the latest public ARN release and adds it to your user PATH.</p>
-        <div class="install"><pre><code>irm https://raw.githubusercontent.com/arnecto/arn/main/scripts/install.ps1 | iex</code></pre></div>
-        <p class="copy-note">Open a new terminal afterward, then run <code>arn</code>.</p>
+        <p class="section-lead">The installer detects your supported release and places ARN on your user PATH.</p>
+        <div class="install-grid">
+          <div class="install"><h3>Windows PowerShell</h3><pre><code>irm https://raw.githubusercontent.com/arnecto/arn/main/scripts/install.ps1 | iex</code></pre></div>
+          <div class="install"><h3>Linux or macOS</h3><pre><code>curl -fsSL https://raw.githubusercontent.com/arnecto/arn/main/scripts/install.sh | sh</code></pre></div>
+        </div>
+        <p class="copy-note">Open a new terminal afterward, then run <code>arn</code>. macOS requires OpenSSL 3 from Homebrew.</p>
       </section>
 
       <section id="start">

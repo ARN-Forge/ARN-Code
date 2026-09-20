@@ -1,6 +1,6 @@
-cmake_minimum_required(VERSION 3.30)
+cmake_minimum_required(VERSION 3.20)
 
-project(ArnAgentCode VERSION 0.3.1 LANGUAGES CXX)
+project(ArnAgentCode VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,15 +27,25 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(nlohmann_json cpp_httplib)
 
+find_package(Threads REQUIRED)
+
+if (WIN32)
+    set(ARN_TERMINAL_SOURCE src/terminal_windows.cpp)
+else()
+    set(ARN_TERMINAL_SOURCE src/terminal_posix.cpp)
+endif()
+
 add_executable(arn
     src/main.cpp
     src/api_client.cpp
     src/config_manager.cpp
     src/tool_executor.cpp
+    ${ARN_TERMINAL_SOURCE}
 )
 
 target_include_directories(arn PRIVATE include)
-target_link_libraries(arn PRIVATE nlohmann_json::nlohmann_json httplib::httplib)
+target_compile_definitions(arn PRIVATE ARN_VERSION="${PROJECT_VERSION}")
+target_link_libraries(arn PRIVATE nlohmann_json::nlohmann_json httplib::httplib Threads::Threads)
 if (MSVC)
     target_compile_options(arn PRIVATE /utf-8)
 endif()

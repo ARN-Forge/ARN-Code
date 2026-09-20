@@ -6,15 +6,56 @@ on:
 
 jobs:
   build:
-    name: Windows build
-    # The terminal UI currently uses the Windows Console API, so checking it
-    # on Linux/macOS would fail before it reaches the actual project code.
-    runs-on: windows-latest
+    name: ${{ matrix.name }} build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+          - name: Linux x64
+            os: ubuntu-latest
+          - name: macOS arm64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: C:\vcpkg\vcpkg.exe install openssl:x64-windows
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev ninja-build
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install openssl@3 ninja
+
+      - name: Configure Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake"
+
+      - name: Configure Linux
+        if: runner.os == 'Linux'
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure macOS
+        if: runner.os == 'macOS'
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
 
       - name: Build
         run: cmake --build build --config Release --parallel
+
+      - name: Smoke test Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\build\Release\arn.exe --version
+
+      - name: Smoke test Unix executable
+        if: runner.os != 'Windows'
+        run: ./build/arn --version

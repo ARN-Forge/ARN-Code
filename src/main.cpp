@@ -1,20 +1,14 @@
 #include "api_client.hpp"
+#include "terminal.hpp"
 #include "tool_executor.hpp"
 
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <conio.h>
-
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
-#include <chrono>
 #include <iostream>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -23,62 +17,13 @@ namespace {
 constexpr std::string_view reset = "\x1b[0m", cyan = "\x1b[38;5;81m", amber = "\x1b[38;5;215m";
 constexpr std::string_view orange = "\x1b[38;5;208m", green = "\x1b[38;5;114m";
 constexpr std::string_view dim = "\x1b[90m", red = "\x1b[38;5;203m";
-
-std::atomic<std::atomic_bool*> active_cancel_flag = nullptr;
-
-BOOL WINAPI handle_console_control(DWORD type) {
-    if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT) return FALSE;
-    if (auto* flag = active_cancel_flag.load(std::memory_order_acquire)) {
-        flag->store(true, std::memory_order_relaxed);
-    }
-    // Windows Terminal handles Ctrl+C itself while text is selected. If the
-    // event reaches ARN, consume it so copying (or an accidental Ctrl+C at the
-    // prompt) never terminates the whole session. During a request it still
-    // acts as cancellation through active_cancel_flag.
-    return TRUE;
-}
-
-class AlternateScreen {
-public:
-    AlternateScreen() {
-        output_ = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (output_ != INVALID_HANDLE_VALUE && GetConsoleMode(output_, &mode_)) {
-            SetConsoleMode(output_, mode_ | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-        }
-        input_ = GetStdHandle(STD_INPUT_HANDLE);
-        if (input_ != INVALID_HANDLE_VALUE && GetConsoleMode(input_, &input_mode_)) {
-            input_mode_changed_ = true;
-            set_copy_mode(false);
-        }
-        std::cout << "\x1b[?1049h\x1b[2J\x1b[H" << std::flush;
-    }
-    ~AlternateScreen() {
-        std::cout << reset << "\x1b[?25h\x1b[?1049l" << std::flush;
-        if (output_ != INVALID_HANDLE_VALUE) SetConsoleMode(output_, mode_);
-        if (input_mode_changed_) SetConsoleMode(input_, input_mode_);
-    }
-    void set_copy_mode(bool enabled) {
-        if (!input_mode_changed_) return;
-        DWORD interactive_mode = input_mode_ | ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT;
-        if (enabled) {
-            interactive_mode |= ENABLE_QUICK_EDIT_MODE;
-            interactive_mode &= ~ENABLE_MOUSE_INPUT;
-        } else {
-            interactive_mode |= ENABLE_MOUSE_INPUT;
-            interactive_mode &= ~ENABLE_QUICK_EDIT_MODE;
-        }
-        SetConsoleMode(input_, interactive_mode);
-        copy_mode_ = enabled;
-    }
-    [[nodiscard]] bool copy_mode() const { return copy_mode_; }
-private:
-    HANDLE output_{INVALID_HANDLE_VALUE};
-    HANDLE input_{INVALID_HANDLE_VALUE};
-    DWORD mode_{};
-    DWORD input_mode_{};
-    bool input_mode_changed_{};
-    bool copy_mode_{};
-};
+#if defined(__APPLE__)
+constexpr std::string_view copy_shortcut = "Command+C";
+#elif defined(_WIN32)
+constexpr std::string_view copy_shortcut = "Ctrl+C";
+#else
+constexpr std::string_view copy_shortcut = "Ctrl+Shift+C";
+#endif
 
 std::string trim(std::string text) {
     const auto first = text.find_first_not_of(" \t");
@@ -93,14 +38,6 @@ std::string lower_ascii(std::string text) {
 std::string remove_quotes(std::string text) {
     text = trim(std::move(text));
     return text.size() >= 2 && text.front() == '"' && text.back() == '"' ? text.substr(1, text.size() - 2) : text;
-}
-
-std::string to_utf8(const std::wstring& text) {
-    if (text.empty()) return {};
-    const int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
-    std::string result(count, '\0');
-    WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), result.data(), count, nullptr, nullptr);
-    return result;
 }
 
 std::size_t char_bytes(unsigned char byte) {
@@ -148,6 +85,8 @@ struct Entry { Tone tone; std::string text; };
 
 class Ui {
 public:
+    explicit Ui(const arn::TerminalSession& terminal) : terminal_(terminal) {}
+
     void add(Tone tone, std::string text) {
         log_.push_back({tone, std::move(text)});
         if (log_.size() > 180) log_.erase(log_.begin(), log_.begin() + 20);
@@ -217,17 +156,16 @@ public:
     }
 
 private:
-    static std::pair<int, int> dimensions() {
-        CONSOLE_SCREEN_BUFFER_INFO info{};
-        if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info)) return {info.srWindow.Right - info.srWindow.Left + 1, info.srWindow.Bottom - info.srWindow.Top + 1};
-        return {100, 30};
+    [[nodiscard]] std::pair<int, int> dimensions() const {
+        const auto dimensions = terminal_.size();
+        return {dimensions.width, dimensions.height};
     }
     // render() clears the screen once before drawing. Clearing each individual
     // cell would erase content that was drawn earlier on the same row.
     static void at(int row, int column, const std::string& text) { std::cout << "\x1b[" << row << ';' << column << "H" << text; }
     static void clear_line(int row) { std::cout << "\x1b[" << row << ";1H\x1b[2K"; }
     std::string current_hint() const {
-        if (copy_mode_) return "COPY MODE · Drag to select, then Ctrl+C · F2 returns to scrolling";
+        if (copy_mode_) return "COPY MODE · Drag to select, then " + std::string(copy_shortcut) + " · F2 returns to scrolling";
         if (scroll_offset_ != 0) return "Scrolled up · Wheel down or End returns to the latest message · Shift+drag selects text";
         return hint_.empty() ? status_ : hint_;
     }
@@ -272,29 +210,11 @@ private:
         }
     }
     std::vector<Entry> log_;
+    const arn::TerminalSession& terminal_;
     std::string input_, hint_, status_{"Type /help for commands · F2 copy mode"}, provider_{"none"}, model_;
     std::size_t scroll_offset_{};
     bool copy_mode_{};
     bool context_{};
-};
-
-class CancellationWatcher {
-public:
-    CancellationWatcher(std::atomic_bool& cancelled, arn::ApiClient& client) : cancelled_(cancelled), client_(client) {
-        active_cancel_flag.store(&cancelled_, std::memory_order_release);
-        thread_ = std::jthread([this](std::stop_token stop) {
-            bool previous = false;
-            while (!stop.stop_requested()) {
-                const bool escape = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-                if ((escape && !previous) || cancelled_.load(std::memory_order_relaxed)) { cancelled_.store(true, std::memory_order_relaxed); client_.cancel_active_request(); return; }
-                previous = escape;
-                std::this_thread::sleep_for(std::chrono::milliseconds(25));
-            }
-        });
-    }
-    ~CancellationWatcher() { thread_.request_stop(); if (thread_.joinable()) thread_.join(); active_cancel_flag.store(nullptr, std::memory_order_release); }
-private:
-    std::atomic_bool& cancelled_; arn::ApiClient& client_; std::jthread thread_;
 };
 
 constexpr std::array command_hints{"/key-gemini", "/key-deepseek", "/model", "/models", "/provider", "/status", "/clear-session", "/clear", "/help", "/exit"};
@@ -342,47 +262,44 @@ std::string preferred_model(arn::Provider provider, const std::vector<std::strin
     return models.empty() ? std::string{} : models.front();
 }
 
-std::string read_line(Ui& ui, AlternateScreen& screen) {
-    std::wstring buffer;
-    const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+void erase_last_utf8_character(std::string& text) {
+    if (text.empty()) return;
+    auto position = text.size() - 1;
+    while (position > 0 && (static_cast<unsigned char>(text[position]) & 0xC0) == 0x80) --position;
+    text.erase(position);
+}
+
+std::string read_line(Ui& ui, arn::TerminalSession& terminal) {
+    std::string buffer;
     for (;;) {
-        INPUT_RECORD event{}; DWORD count{};
-        if (input == INVALID_HANDLE_VALUE || !ReadConsoleInputW(input, &event, 1, &count)) return {};
-        if (event.EventType == WINDOW_BUFFER_SIZE_EVENT) { ui.render(); continue; }
-        if (event.EventType == MOUSE_EVENT) {
-            const auto& mouse = event.Event.MouseEvent;
-            if (mouse.dwEventFlags == MOUSE_WHEELED) {
-                const auto delta = static_cast<SHORT>(HIWORD(mouse.dwButtonState));
-                ui.scroll(delta > 0 ? 3 : -3);
-                ui.render();
-            }
-            continue;
-        }
-        if (event.EventType != KEY_EVENT || !event.Event.KeyEvent.bKeyDown) continue;
-        const auto& key = event.Event.KeyEvent;
-        if (key.wVirtualKeyCode == VK_F2) {
-            screen.set_copy_mode(!screen.copy_mode());
-            ui.copy_mode(screen.copy_mode());
+        const auto event = terminal.read_event();
+        if (event.type == arn::TerminalEventType::resize) { ui.render(); continue; }
+        if (event.type == arn::TerminalEventType::wheel_up) { ui.scroll(3); ui.render(); continue; }
+        if (event.type == arn::TerminalEventType::wheel_down) { ui.scroll(-3); ui.render(); continue; }
+        if (event.type == arn::TerminalEventType::f2) {
+            terminal.set_copy_mode(!terminal.copy_mode());
+            ui.copy_mode(terminal.copy_mode());
             ui.render_input();
             continue;
         }
-        if (key.wVirtualKeyCode == VK_PRIOR) { ui.scroll(8); ui.render(); continue; }
-        if (key.wVirtualKeyCode == VK_NEXT) { ui.scroll(-8); ui.render(); continue; }
-        if (key.wVirtualKeyCode == VK_END) { ui.scroll_to_bottom(); ui.render(); continue; }
-        if (key.uChar.UnicodeChar == L'\r') { ui.input({}); ui.hint({}); return to_utf8(buffer); }
-        if (key.uChar.UnicodeChar == 3) continue;
-        if (screen.copy_mode() && key.uChar.UnicodeChar >= L' ') {
-            screen.set_copy_mode(false);
+        if (event.type == arn::TerminalEventType::page_up) { ui.scroll(8); ui.render(); continue; }
+        if (event.type == arn::TerminalEventType::page_down) { ui.scroll(-8); ui.render(); continue; }
+        if (event.type == arn::TerminalEventType::end) { ui.scroll_to_bottom(); ui.render(); continue; }
+        if (event.type == arn::TerminalEventType::enter) { ui.input({}); ui.hint({}); return buffer; }
+        if (event.type == arn::TerminalEventType::end_of_input) return "/exit";
+        if (event.type == arn::TerminalEventType::interrupt || event.type == arn::TerminalEventType::none) continue;
+        if (terminal.copy_mode() && event.type == arn::TerminalEventType::character) {
+            terminal.set_copy_mode(false);
             ui.copy_mode(false);
         }
-        if (key.wVirtualKeyCode == VK_BACK) { if (!buffer.empty()) buffer.pop_back(); }
-        else if (key.wVirtualKeyCode == VK_TAB) {
-            const auto prefix = to_utf8(buffer);
-            for (const auto hint : command_hints) if (std::string_view(hint).starts_with(prefix)) { buffer.assign(hint, hint + std::char_traits<char>::length(hint)); buffer += L' '; break; }
-        } else if (key.uChar.UnicodeChar >= L' ') buffer += key.uChar.UnicodeChar;
-        const auto current_input = to_utf8(buffer);
-        ui.input(current_input);
-        ui.hint(input_hint(current_input));
+        if (event.type == arn::TerminalEventType::backspace) erase_last_utf8_character(buffer);
+        else if (event.type == arn::TerminalEventType::tab) {
+            for (const auto hint : command_hints) {
+                if (std::string_view(hint).starts_with(buffer)) { buffer = hint; buffer += ' '; break; }
+            }
+        } else if (event.type == arn::TerminalEventType::character) buffer += event.text;
+        ui.input(buffer);
+        ui.hint(input_hint(buffer));
         ui.render_input();
     }
 }
@@ -390,27 +307,32 @@ std::string read_line(Ui& ui, AlternateScreen& screen) {
 arn::Provider provider_from_name(const std::string& value) { return value == "gemini" ? arn::Provider::gemini : value == "deepseek" ? arn::Provider::deepseek : arn::Provider::none; }
 
 int run() {
-    AlternateScreen screen;
-    Ui ui;
+    arn::TerminalSession terminal;
+    Ui ui(terminal);
     arn::ApiClient client;
     const arn::ToolExecutor tools;
     arn::Provider provider = arn::Provider::none;
     std::string key, model;
     std::vector<std::string> models;
     const auto refresh = [&] { ui.session(provider, model, client.session_entries() != 0); ui.render(); };
-    const auto confirm = [&](const arn::ToolRequest& request) {
-        ui.status("Allow file change? " + request.summary + " [y/N]"); refresh();
-        const int answer = _getch(); ui.status("Type /help for commands · F2 copy mode"); return answer == 'y' || answer == 'Y';
-    };
     refresh();
     for (;;) {
-        const auto input = normalize_command(trim(read_line(ui, screen)));
+        const auto input = normalize_command(trim(read_line(ui, terminal)));
         if (input.empty()) { refresh(); continue; }
         ui.add(Tone::user, "arn › " + input);
         if (input.front() != '/') {
             ui.add(Tone::normal, {}); ui.status("Arnie is working… Esc or Ctrl+C cancels"); refresh();
             std::atomic_bool cancelled = false;
-            CancellationWatcher watcher(cancelled, client);
+            arn::TerminalCancellationMonitor watcher(cancelled, [&client] { client.cancel_active_request(); });
+            const auto confirm = [&](const arn::ToolRequest& request) {
+                watcher.pause_input();
+                ui.status("Allow file change? " + request.summary + " [y/N]");
+                refresh();
+                const int answer = terminal.read_confirmation();
+                ui.status("Type /help for commands · F2 copy mode");
+                watcher.resume_input();
+                return answer == 'y' || answer == 'Y';
+            };
             const auto result = client.submit_prompt(provider, key, model, input, tools, confirm, [&](std::string_view text) { ui.append(text); refresh(); }, &cancelled);
             if (result.cancelled) ui.add(Tone::warning, "Request cancelled.");
             else if (!result.ok) ui.add(Tone::error, "Error: " + result.message);
@@ -447,7 +369,14 @@ int run() {
 
 } // namespace
 
-int wmain() {
-    SetConsoleOutputCP(CP_UTF8); SetConsoleCP(CP_UTF8); SetConsoleCtrlHandler(handle_console_control, TRUE);
+#ifndef ARN_VERSION
+#define ARN_VERSION "dev"
+#endif
+
+int main(int argc, char** argv) {
+    if (argc > 1 && (std::string_view(argv[1]) == "--version" || std::string_view(argv[1]) == "-v")) {
+        std::cout << "arn " << ARN_VERSION << '\n';
+        return 0;
+    }
     return run();
 }
