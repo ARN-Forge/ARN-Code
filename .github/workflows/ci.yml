@@ -17,6 +17,8 @@ jobs:
             os: ubuntu-latest
           - name: macOS arm64
             os: macos-latest
+          - name: macOS x64
+            os: macos-15-intel
     runs-on: ${{ matrix.os }}
 
     steps:

@@ -207,13 +207,14 @@ struct TerminalCancellationMonitor::Impl {
     std::function<void()> cancel_request;
     std::atomic_bool input_paused{false};
     std::atomic_bool pause_acknowledged{false};
-    std::jthread thread;
+    std::atomic_bool stop_requested{false};
+    std::thread thread;
 
     Impl(std::atomic_bool& flag, std::function<void()> callback)
         : cancelled(flag), cancel_request(std::move(callback)) {
         interrupt_requested = 0;
-        thread = std::jthread([this](std::stop_token stop) {
-            while (!stop.stop_requested()) {
+        thread = std::thread([this] {
+            while (!stop_requested.load(std::memory_order_relaxed)) {
                 if (input_paused.load(std::memory_order_acquire)) {
                     pause_acknowledged.store(true, std::memory_order_release);
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -250,7 +251,7 @@ struct TerminalCancellationMonitor::Impl {
     }
 
     ~Impl() {
-        thread.request_stop();
+        stop_requested.store(true, std::memory_order_relaxed);
         if (thread.joinable()) thread.join();
     }
 };
