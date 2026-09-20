@@ -257,7 +257,10 @@ ApiResult gemini_models(const std::string& api_key) {
     client.set_connection_timeout(10, 0);
     client.set_read_timeout(30, 0);
     const auto response = execute_with_retry([&] {
-        return client.Get("/v1beta/models", {{"x-goog-api-key", api_key}});
+        // Gemini returns only 50 models by default. The catalogue can now be
+        // larger than that, and the first page is not guaranteed to contain a
+        // text-generation model. Request the documented maximum page size.
+        return client.Get("/v1beta/models?pageSize=1000", {{"x-goog-api-key", api_key}});
     });
     if (!response) return {false, "Network request failed: " + httplib::to_string(response.error())};
     if (response->status < 200 || response->status >= 300) return parse_error(response->status, "Gemini", response->body);
