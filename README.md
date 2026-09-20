@@ -194,6 +194,46 @@ The dependency stack is deliberately small:
 Every push is compiled on Windows, Linux, and macOS by GitHub Actions. Tagged
 releases publish all four platform archives from the same source revision.
 
+## ARN IDE Prototype
+
+A lightweight desktop IDE for ARN is in early development. It provides a graphical interface for file editing and agent interaction, built with Tauri 2 and React.
+
+### Features
+
+- Multi-tab code editor with syntax highlighting (Monaco)
+- File tree browser with project-root restriction
+- Chat panel for AI interaction (Gemini, DeepSeek)
+- File change review and confirmation flow
+- Safe unsaved-buffer protection
+
+### Get Started
+
+```bash
+cd ide
+npm install
+npm run tauri:dev
+```
+
+See [`ide/README.md`](ide/README.md) for full documentation, architecture overview, and development instructions.
+
+### Current Status
+
+The IDE prototype includes:
+- ✅ File tree and multi-tab editor
+- ✅ Project folder selection
+- ✅ ARN headless server mode (`arn --server` with JSONL protocol)
+- ⏳ Chat panel and provider integration
+- ⏳ Change review workflow
+
+### Implementation Notes
+
+- The ARN core now supports `--server` mode for headless operation
+- The IDE communicates with ARN via JSONL (one JSON object per line)
+- All file access is sandboxed to the selected project root
+- API keys are kept in memory only and never persisted
+
+See [IDE_IMPLEMENTATION_SUMMARY.md](IDE_IMPLEMENTATION_SUMMARY.md) for detailed technical documentation.
+
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and
