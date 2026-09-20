@@ -264,8 +264,15 @@ ApiResult gemini_models(const std::string& api_key) {
     try {
         std::vector<std::string> models;
         for (const auto& model : json::parse(response->body).at("models")) {
-            const auto methods = model.value("supportedGenerationMethods", std::vector<std::string>{});
-            if (std::ranges::find(methods, "generateContent") != methods.end()) {
+            // Gemini now returns `supportedActions`; older API responses used
+            // `supportedGenerationMethods`. Accept both formats so the client
+            // remains compatible while Google transitions the API schema.
+            const auto actions = model.value("supportedActions", std::vector<std::string>{});
+            const auto legacy_methods = model.value("supportedGenerationMethods", std::vector<std::string>{});
+            const bool supports_generation =
+                std::ranges::find(actions, "generateContent") != actions.end() ||
+                std::ranges::find(legacy_methods, "generateContent") != legacy_methods.end();
+            if (supports_generation) {
                 auto name = model.at("name").get<std::string>();
                 constexpr std::string_view prefix = "models/";
                 if (name.starts_with(prefix)) name.erase(0, prefix.size());
