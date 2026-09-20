@@ -12,6 +12,13 @@ and DeepSeek—without Node.js, Python, or a heavyweight runtime.
 > conversation context, and confirmed local file tools work. Persistent
 > configuration and shell command execution are planned.
 
+## Demo
+
+![ARN terminal demo](docs/assets/arn-demo.gif)
+
+*Connect a provider, choose a model, and let ARN safely create a file in the
+current project.*
+
 ## Highlights
 
 - Native C++23 CLI executable: `arn`
