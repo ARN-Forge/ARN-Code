@@ -15,7 +15,7 @@ Python, or a heavyweight runtime.
 - Retained terminal UI: resize-safe transcript, adaptive layout, and a clean
   return to the original PowerShell screen on exit
 - Mouse-wheel transcript scrolling, plus `Page Up`, `Page Down`, and `End`
-- Text selection with `Shift` + mouse drag and copying with `Ctrl+C`
+- Dedicated `F2` copy mode for normal mouse selection and `Ctrl+C`
 - Gemini and DeepSeek API support
 - Model discovery per API key and `/model` selection
 - API keys held only in process memory
@@ -63,8 +63,9 @@ Explain how this CMake project is organized.
 Use `/help` to view every available command.
 
 Long transcripts can be reviewed with the mouse wheel or `Page Up` and
-`Page Down`; press `End` to return to the latest message. Because ARN captures
-mouse input for scrolling, hold `Shift` while dragging to select terminal text.
+`Page Down`; press `End` to return to the latest message. Press `F2` to enter
+copy mode, drag normally to select terminal text, and press `Ctrl+C`. Press
+`F2` again—or simply start typing—to restore mouse-wheel scrolling.
 
 ### Install a Windows release
 

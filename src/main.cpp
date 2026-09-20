@@ -47,10 +47,8 @@ public:
         }
         input_ = GetStdHandle(STD_INPUT_HANDLE);
         if (input_ != INVALID_HANDLE_VALUE && GetConsoleMode(input_, &input_mode_)) {
-            DWORD interactive_mode = input_mode_ | ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT;
-            interactive_mode &= ~ENABLE_QUICK_EDIT_MODE;
-            SetConsoleMode(input_, interactive_mode);
             input_mode_changed_ = true;
+            set_copy_mode(false);
         }
         std::cout << "\x1b[?1049h\x1b[2J\x1b[H" << std::flush;
     }
@@ -59,12 +57,27 @@ public:
         if (output_ != INVALID_HANDLE_VALUE) SetConsoleMode(output_, mode_);
         if (input_mode_changed_) SetConsoleMode(input_, input_mode_);
     }
+    void set_copy_mode(bool enabled) {
+        if (!input_mode_changed_) return;
+        DWORD interactive_mode = input_mode_ | ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT;
+        if (enabled) {
+            interactive_mode |= ENABLE_QUICK_EDIT_MODE;
+            interactive_mode &= ~ENABLE_MOUSE_INPUT;
+        } else {
+            interactive_mode |= ENABLE_MOUSE_INPUT;
+            interactive_mode &= ~ENABLE_QUICK_EDIT_MODE;
+        }
+        SetConsoleMode(input_, interactive_mode);
+        copy_mode_ = enabled;
+    }
+    [[nodiscard]] bool copy_mode() const { return copy_mode_; }
 private:
     HANDLE output_{INVALID_HANDLE_VALUE};
     HANDLE input_{INVALID_HANDLE_VALUE};
     DWORD mode_{};
     DWORD input_mode_{};
     bool input_mode_changed_{};
+    bool copy_mode_{};
 };
 
 std::string trim(std::string text) {
@@ -145,6 +158,7 @@ public:
     void input(std::string value) { input_ = std::move(value); }
     void hint(std::string value) { hint_ = std::move(value); }
     void status(std::string value) { status_ = std::move(value); }
+    void copy_mode(bool enabled) { copy_mode_ = enabled; }
     void session(arn::Provider provider, const std::string& model, bool context) {
         provider_ = arn::provider_name(provider); model_ = model; context_ = context;
     }
@@ -213,6 +227,7 @@ private:
     static void at(int row, int column, const std::string& text) { std::cout << "\x1b[" << row << ';' << column << "H" << text; }
     static void clear_line(int row) { std::cout << "\x1b[" << row << ";1H\x1b[2K"; }
     std::string current_hint() const {
+        if (copy_mode_) return "COPY MODE · Drag to select, then Ctrl+C · F2 returns to scrolling";
         if (scroll_offset_ != 0) return "Scrolled up · Wheel down or End returns to the latest message · Shift+drag selects text";
         return hint_.empty() ? status_ : hint_;
     }
@@ -257,8 +272,9 @@ private:
         }
     }
     std::vector<Entry> log_;
-    std::string input_, hint_, status_{"Type /help for commands"}, provider_{"none"}, model_;
+    std::string input_, hint_, status_{"Type /help for commands · F2 copy mode"}, provider_{"none"}, model_;
     std::size_t scroll_offset_{};
+    bool copy_mode_{};
     bool context_{};
 };
 
@@ -285,7 +301,7 @@ constexpr std::array command_hints{"/key-gemini", "/key-deepseek", "/model", "/m
 
 std::string input_hint(std::string_view input) {
     if (!input.starts_with('/') || input.find_first_of(" \t") != std::string_view::npos) {
-        return "Type /help for commands · Esc cancels a request";
+        return "Type /help for commands · Esc cancels a request · F2 copy mode";
     }
     std::string result;
     for (const auto command : command_hints) {
@@ -326,7 +342,7 @@ std::string preferred_model(arn::Provider provider, const std::vector<std::strin
     return models.empty() ? std::string{} : models.front();
 }
 
-std::string read_line(Ui& ui) {
+std::string read_line(Ui& ui, AlternateScreen& screen) {
     std::wstring buffer;
     const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
     for (;;) {
@@ -344,11 +360,21 @@ std::string read_line(Ui& ui) {
         }
         if (event.EventType != KEY_EVENT || !event.Event.KeyEvent.bKeyDown) continue;
         const auto& key = event.Event.KeyEvent;
+        if (key.wVirtualKeyCode == VK_F2) {
+            screen.set_copy_mode(!screen.copy_mode());
+            ui.copy_mode(screen.copy_mode());
+            ui.render_input();
+            continue;
+        }
         if (key.wVirtualKeyCode == VK_PRIOR) { ui.scroll(8); ui.render(); continue; }
         if (key.wVirtualKeyCode == VK_NEXT) { ui.scroll(-8); ui.render(); continue; }
         if (key.wVirtualKeyCode == VK_END) { ui.scroll_to_bottom(); ui.render(); continue; }
         if (key.uChar.UnicodeChar == L'\r') { ui.input({}); ui.hint({}); return to_utf8(buffer); }
         if (key.uChar.UnicodeChar == 3) continue;
+        if (screen.copy_mode() && key.uChar.UnicodeChar >= L' ') {
+            screen.set_copy_mode(false);
+            ui.copy_mode(false);
+        }
         if (key.wVirtualKeyCode == VK_BACK) { if (!buffer.empty()) buffer.pop_back(); }
         else if (key.wVirtualKeyCode == VK_TAB) {
             const auto prefix = to_utf8(buffer);
@@ -374,11 +400,11 @@ int run() {
     const auto refresh = [&] { ui.session(provider, model, client.session_entries() != 0); ui.render(); };
     const auto confirm = [&](const arn::ToolRequest& request) {
         ui.status("Allow file change? " + request.summary + " [y/N]"); refresh();
-        const int answer = _getch(); ui.status("Type /help for commands"); return answer == 'y' || answer == 'Y';
+        const int answer = _getch(); ui.status("Type /help for commands · F2 copy mode"); return answer == 'y' || answer == 'Y';
     };
     refresh();
     for (;;) {
-        const auto input = normalize_command(trim(read_line(ui)));
+        const auto input = normalize_command(trim(read_line(ui, screen)));
         if (input.empty()) { refresh(); continue; }
         ui.add(Tone::user, "arn › " + input);
         if (input.front() != '/') {
@@ -389,7 +415,7 @@ int run() {
             if (result.cancelled) ui.add(Tone::warning, "Request cancelled.");
             else if (!result.ok) ui.add(Tone::error, "Error: " + result.message);
             else if (result.message.empty()) ui.add(Tone::muted, "Done.");
-            ui.status("Type /help for commands"); refresh(); continue;
+            ui.status("Type /help for commands · F2 copy mode"); refresh(); continue;
         }
         const auto separator = input.find_first_of(" \t");
         const auto command = lower_ascii(input.substr(0, separator));
@@ -415,7 +441,7 @@ int run() {
             if (std::ranges::find(models, selected) == models.end()) ui.add(Tone::warning, "That model is not in the active provider list. Use /models.");
             else { model = selected; client.reset_session(); ui.add(Tone::good, "Active model: " + model); }
         } else ui.add(Tone::error, "Unknown command. Type /help for commands.");
-        ui.status("Type /help for commands"); refresh();
+        ui.status("Type /help for commands · F2 copy mode"); refresh();
     }
 }
 
