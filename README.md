@@ -1,5 +1,9 @@
 # Arn Agent Code
 
+
+https://github.com/user-attachments/assets/658e3a75-4e4a-40f0-9803-b0e0e3662789
+
+
 **Arn Agent Code** is a fast, native C++23 terminal agent for coding workflows
 on Windows, Linux, and macOS. It talks directly to LLM APIs—currently Gemini
 and DeepSeek—without Node.js, Python, or a heavyweight runtime.
