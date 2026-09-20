@@ -48,8 +48,20 @@ const os = navigator.platform || '';
 if (/Mac/i.test(os)) selectPlatform('macos'); else if (/Linux/i.test(os) && !/Android/i.test(navigator.userAgent)) selectPlatform('linux');
 const reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
 const mascot = el('mascot');
-const crab = mascot.querySelector('svg');
-mascot.addEventListener('pointermove', event => {if(reduced.matches) return; const bounds = mascot.getBoundingClientRect(); crab.style.translate = ((event.clientX - bounds.left - bounds.width / 2) / 18) + 'px ' + ((event.clientY - bounds.top - bounds.height / 2) / 18) + 'px';});
+const crab = mascot.querySelector('.ascii-crab');
+let motionOn = !reduced.matches;
+let motionChosen = false;
+function updateMotion() {
+  document.documentElement.classList.toggle('motion-enabled', motionOn);
+  document.documentElement.classList.toggle('motion-paused', !motionOn);
+  el('motion-toggle').setAttribute('aria-pressed', String(motionOn));
+  el('motion-toggle').textContent = motionOn ? 'Animation: on · pause' : 'Animation: off · play';
+  crab.style.translate = '';
+}
+el('motion-toggle').addEventListener('click', () => {motionChosen = true; motionOn = !motionOn; updateMotion();});
+reduced.addEventListener('change', () => {if (!motionChosen) {motionOn = !reduced.matches; updateMotion();}});
+updateMotion();
+mascot.addEventListener('pointermove', event => {if(!motionOn) return; const bounds = mascot.getBoundingClientRect(); crab.style.translate = ((event.clientX - bounds.left - bounds.width / 2) / 18) + 'px ' + ((event.clientY - bounds.top - bounds.height / 2) / 18) + 'px';});
 mascot.addEventListener('pointerleave', () => {crab.style.translate = '';});
 let greeting = 0;
 mascot.addEventListener('click', () => {const lines = ['Hey, builder. What are we making?', 'My claws are ready. Your call.', 'Small binary. Big plans.']; el('mascot-note').textContent = lines[greeting++ % lines.length];});
