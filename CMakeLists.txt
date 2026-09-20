@@ -40,6 +40,7 @@ add_executable(arn
     src/api_client.cpp
     src/config_manager.cpp
     src/tool_executor.cpp
+    src/server.cpp
     ${ARN_TERMINAL_SOURCE}
 )
 

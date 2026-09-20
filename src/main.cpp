@@ -1,6 +1,7 @@
 #include "api_client.hpp"
 #include "terminal.hpp"
 #include "tool_executor.hpp"
+#include "server.hpp"
 
 #include <algorithm>
 #include <array>
@@ -374,9 +375,15 @@ int run() {
 #endif
 
 int main(int argc, char** argv) {
-    if (argc > 1 && (std::string_view(argv[1]) == "--version" || std::string_view(argv[1]) == "-v")) {
-        std::cout << "arn " << ARN_VERSION << '\n';
-        return 0;
+    if (argc > 1) {
+        const auto arg = std::string_view(argv[1]);
+        if (arg == "--version" || arg == "-v") {
+            std::cout << "arn " << ARN_VERSION << '\n';
+            return 0;
+        }
+        if (arg == "--server") {
+            return arn::run_server();
+        }
     }
     return run();
 }
