@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ArnAgentCode VERSION 0.4.3 LANGUAGES CXX)
+project(ArnAgentCode VERSION 0.4.4 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -48,4 +48,12 @@ target_compile_definitions(arn PRIVATE ARN_VERSION="${PROJECT_VERSION}")
 target_link_libraries(arn PRIVATE nlohmann_json::nlohmann_json httplib::httplib Threads::Threads)
 if (MSVC)
     target_compile_options(arn PRIVATE /utf-8)
+endif()
+
+include(CTest)
+if (BUILD_TESTING)
+    add_executable(model_list_test tests/model_list_test.cpp)
+    target_include_directories(model_list_test PRIVATE include)
+    target_link_libraries(model_list_test PRIVATE nlohmann_json::nlohmann_json)
+    add_test(NAME model_list COMMAND model_list_test)
 endif()
