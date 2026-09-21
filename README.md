@@ -194,9 +194,11 @@ The dependency stack is deliberately small:
 Every push is compiled on Windows, Linux, and macOS by GitHub Actions. Tagged
 releases publish all four platform archives from the same source revision.
 
-## ARN IDE Prototype
+## ARN IDE — v0.5.0
 
-A lightweight desktop IDE for ARN is in early development. It provides a graphical interface for file editing and agent interaction, built with Tauri 2 and React.
+A lightweight desktop IDE for ARN provides file editing and agent interaction through Tauri 2 and React. AI providers and agent file tools run in the existing C++ ARN engine.
+
+Download **arn-ide-windows-x64.zip** from [Releases](https://github.com/arnecto/arn/releases), extract it, and launch `arn-ide.exe`. Keep the included `arn.exe` and OpenSSL DLLs beside it. Windows WebView2 Runtime is required. CLI downloads and installers remain available separately.
 
 ### Features
 
@@ -222,17 +224,18 @@ The IDE prototype includes:
 - ✅ File tree and multi-tab editor
 - ✅ Project folder selection
 - ✅ ARN headless server mode (`arn --server` with JSONL protocol)
-- ⏳ Chat panel and provider integration
-- ⏳ Change review workflow
+- ✅ Streaming chat, provider verification and model selection
+- ✅ Before/after review, approval timeouts and cancellation
+- ✅ Orange Arny crab icon and readable dark-theme controls
 
 ### Implementation Notes
 
 - The ARN core now supports `--server` mode for headless operation
 - The IDE communicates with ARN via JSONL (one JSON object per line)
-- All file access is sandboxed to the selected project root
+- Agent file tools validate paths against the selected project root
 - API keys are kept in memory only and never persisted
 
-See [IDE_IMPLEMENTATION_SUMMARY.md](IDE_IMPLEMENTATION_SUMMARY.md) for detailed technical documentation.
+See [the integration guide](docs/ide-arn-bridge.md) for current behavior, limitations and test commands, and [v0.5.0 release notes](docs/releases/v0.5.0.md) for this release.
 
 ## Development
 

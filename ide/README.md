@@ -1,175 +1,78 @@
-# ARN IDE - Prototype
+# ARN IDE v0.5.0
 
-A lightweight desktop IDE for the ARN coding agent, built with Tauri 2, React, and TypeScript.
+ARN's desktop editor uses Tauri 2, React and Monaco. Its AI providers, model
+catalogue, conversation and file tools run in the C++ ARN engine through
+`arn --server`. Rust supervises that process and forwards JSONL events.
 
-## Architecture
+## Windows download
 
-The IDE consists of three main components:
-
-1. **C++ ARN Core** (`../src`, `../include`, `../CMakeLists.txt`)
-   - Existing ARN CLI with new `--server` mode
-   - Provides headless JSONL protocol for IDE communication
-   - Manages API connections (Gemini, DeepSeek) and tool execution
-
-2. **Tauri Backend** (`src-tauri/`)
-   - Launches and supervises the ARN child process in server mode
-   - Implements file system access with project-root sandboxing
-   - Parses JSONL events and forwards them to the React frontend
-
-3. **React Frontend** (`src/`)
-   - File tree browser with syntax highlighting
-   - Monaco Editor with multi-tab support
-   - Chat panel for AI interaction
-   - Change review and confirmation flow
-
-## Prerequisites
-
-- Node.js 18+
-- Rust 1.70+
-- CMake 3.20+
-- A C++23 compiler (MSVC, Clang, or GCC)
-- OpenSSL 3 development libraries
-- Tauri CLI: `npm install --global @tauri-apps/cli`
+Extract **arn-ide-windows-x64.zip** from the
+[GitHub release](https://github.com/arnecto/arn/releases/tag/v0.5.0) and run
+`arn-ide.exe`. Keep `arn.exe` and the OpenSSL DLLs beside it. Windows WebView2
+Runtime is required. This is an unsigned portable archive.
 
 ## Development
 
-### Build and run the IDE
+Install Node.js, a current stable Rust toolchain, CMake, a C++23 compiler,
+OpenSSL development libraries, and the platform's Tauri prerequisites.
+From the repository root on Windows:
 
-```bash
-cd ide
-npm install
+```powershell
+cmake -S . -B build-ide
+cmake --build build-ide --config Release
+Set-Location ide
+npm ci
+$env:CARGO_BUILD_JOBS = '1'
+$env:CARGO_PROFILE_DEV_DEBUG = '0'
 npm run tauri:dev
 ```
 
-This command:
-1. Builds the ARN C++ executable in the parent directory if needed
-2. Starts the Vite dev server on localhost:5173
-3. Launches the Tauri window
+The development command starts Vite and Tauri. Build C++ separately as above.
+ARN is found in repository-relative build folders; `ARN_BIN` can override its
+path. An existing process is stopped when its project changes or the IDE exits.
 
-### Build the C++ ARN executable separately
+To build the standalone IDE executable from `ide`:
 
-```bash
-cd ..
-cmake -S . -B build
-cmake --build build --config Release
+```powershell
+npm run tauri -- build --no-bundle
 ```
 
-On Windows, ensure `libssl-3-x64.dll` and `libcrypto-3-x64.dll` are in the build output directory.
+The executable is in `src-tauri/target/release`. For distribution it must be
+packaged with ARN and its runtime libraries; the release workflow does this.
 
-### Production build
+## Using the agent
 
-```bash
-cd ide
-npm run tauri:build
-```
+Open a project, verify your Gemini or DeepSeek API key, load the provider's
+models and select one. Requests stream text and report progress. Every agent
+file mutation requires approval of its before/after preview, with a
+120-second default-deny timeout. Keys remain in memory.
 
-Output binaries are in `src-tauri/target/release/`.
+Save or close unsaved tabs before sending a prompt. While a request is active,
+the editor is read-only; file events refresh the tree and clean editor buffers.
+Agent paths are resolved against the project root, including symlinks and
+junctions. This is path validation, not an OS sandbox against hostile local
+processes racing filesystem operations.
 
-## Protocol Overview
+The IDE currently has no terminal, debugger or Git UI. Agent tools accept
+text files up to 256 KiB; editor reads are limited to 5 MiB.
 
-When the IDE starts, it launches `arn --server` and communicates via JSONL (one JSON object per line):
+## Tests and protocol
 
-### Commands (sent by IDE to ARN)
+See the [integration guide](../docs/ide-arn-bridge.md) for protocol 2,
+executable discovery, security behavior, local test commands and validation
+limits. The [release notes](../docs/releases/v0.5.0.md) describe this version.
 
-```json
-{"type":"configure","provider":"gemini","apiKey":"...","model":"gemini-2.0-flash"}
-{"type":"prompt","id":"req-1","text":"Explain this code"}
-{"type":"cancel","id":"req-1"}
-{"type":"clear_session"}
-{"type":"list_models"}
-```
+## Icon
 
-### Events (emitted by ARN to IDE)
+`app-icon.svg` reproduces the CLI's orange block-character Arny crab as vector
+geometry. Regenerate it and the Tauri assets from the repository root:
 
-```json
-{"type":"ready"}
-{"type":"configured","provider":"gemini","model":"..."}
-{"type":"stream","requestId":"req-1","text":"..."}
-{"type":"complete","requestId":"req-1"}
-{"type":"error","requestId":"req-1","message":"..."}
-{"type":"confirmation_required","id":"change-1","requestId":"req-1","operation":"write_file","path":"src/foo.cpp","summary":"...","diff":"..."}
-```
-
-API keys are never logged, persisted, or emitted in events.
-
-## File Structure
-
-```
-ide/
-├── index.html               Tauri HTML entry point
-├── src/
-│   ├── main.tsx            React entry point
-│   ├── App.tsx             Main IDE component
-│   ├── index.css           Global styles
-│   └── ...                 Other React components (future)
-├── src-tauri/
-│   ├── tauri.conf.json     Tauri configuration
-│   ├── src/
-│   │   ├── main.rs         Tauri app entry point
-│   │   └── lib.rs          Commands for file I/O
-│   ├── Cargo.toml          Rust dependencies
-│   ├── build.rs            Tauri build script
-│   └── capabilities/       Security capability definitions
-├── vite.config.ts          Vite dev server config
-├── tsconfig.json           TypeScript config
-├── package.json            npm dependencies
-└── README.md               This file
-```
-
-## Current Status (MVP)
-
-### Implemented
-
-- Project folder selection and file tree browser
-- Multi-tab editor with syntax highlighting (Monaco)
-- File read/write with project-root sandboxing
-- Basic Tauri integration
-- Rust backend commands for file operations
-
-### Not Yet Implemented
-
-- ARN server process communication
-- Chat panel and provider configuration
-- Streaming response display
-- File change confirmation flow
-- Save/unsaved state handling
-- Error messages and status display
-
-### Known Limitations
-
-- No symlink resolution (symlinks are treated as-is)
-- File size limit of 5MB for reads/writes
-- No git integration
-- No terminal integration
-- No debugger support
-- API keys stored in memory only (not persisted)
-
-## Future Improvements
-
-- Persistent API key storage using OS credential managers
-- Built-in terminal for shell commands
-- Git UI and status integration
-- Debugger support
-- Plugin marketplace
-- Collaborative editing
-- Project indexing and smart search
-- Auto-update mechanism
-
-## Testing
-
-Run the Rust backend tests:
-
-```bash
-cd src-tauri
-cargo test
-```
-
-Run the frontend in dev mode with hot reload:
-
-```bash
-npm run dev
+```powershell
+node scripts/generate-ide-icon.mjs
+Set-Location ide
+npm run tauri -- icon app-icon.svg --output src-tauri/icons
 ```
 
 ## License
 
-Same as ARN (MIT License).
+MIT, like the rest of ARN.

@@ -21,19 +21,20 @@ struct ToolExecution {
 };
 
 class ToolExecutor {
-public:
+  public:
     using ConfirmationFn = std::function<bool(const ToolRequest&)>;
 
     // The project root is the folder in which `arn` was launched.
-    explicit ToolExecutor(std::filesystem::path project_root = std::filesystem::current_path());
+    explicit ToolExecutor(std::filesystem::path project_root = std::filesystem::current_path(),
+                          std::function<void()> on_change = {});
 
-    [[nodiscard]] ToolExecution execute(const std::string& name,
-                                        const nlohmann::json& arguments,
+    [[nodiscard]] ToolExecution execute(const std::string& name, const nlohmann::json& arguments,
                                         const ConfirmationFn& confirm) const;
     [[nodiscard]] const std::filesystem::path& project_root() const noexcept;
 
-private:
+  private:
     std::filesystem::path project_root_;
+    std::function<void()> on_change_;
 };
 
 } // namespace arn

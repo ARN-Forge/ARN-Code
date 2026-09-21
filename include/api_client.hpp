@@ -1,11 +1,11 @@
 #pragma once
 
-#include <functional>
 #include <atomic>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
-#include <memory>
 #include <vector>
 
 #include <httplib.h>
@@ -25,7 +25,7 @@ struct ApiResult {
 };
 
 class ApiClient {
-public:
+  public:
     using StreamCallback = std::function<void(std::string_view text)>;
     ApiClient() = default;
     ~ApiClient();
@@ -33,19 +33,21 @@ public:
     ApiClient(const ApiClient&) = delete;
     ApiClient& operator=(const ApiClient&) = delete;
 
-    [[nodiscard]] ApiResult list_models(Provider provider, const std::string& api_key) const;
+    [[nodiscard]] ApiResult list_models(Provider provider, const std::string& api_key,
+                                        const std::atomic_bool* cancel_requested = nullptr);
     [[nodiscard]] ApiResult submit_prompt(Provider provider, const std::string& api_key,
                                           const std::string& model, const std::string& prompt,
                                           const ToolExecutor& tools,
                                           const ToolExecutor::ConfirmationFn& confirm,
                                           const StreamCallback& on_text = {},
-                                          const std::atomic_bool* cancel_requested = nullptr);
+                                          const std::atomic_bool* cancel_requested = nullptr,
+                                          const StreamCallback& on_progress = {});
     // Safe to call from a separate thread while a request is running.
     void cancel_active_request();
     void reset_session();
     [[nodiscard]] std::size_t session_entries() const noexcept;
 
-private:
+  private:
     Provider session_provider_{Provider::none};
     std::string session_model_;
     nlohmann::json deepseek_messages_ = nlohmann::json::array();

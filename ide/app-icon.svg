@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Arny, the ARN crab</title>
+  <rect x="16" y="16" width="480" height="480" rx="96" fill="#101820"/>
+  <g fill="#ff9820" shape-rendering="crispEdges">
+    <rect x="74" y="178" width="26" height="26"/>
+    <rect x="100" y="178" width="26" height="26"/>
+    <rect x="386" y="178" width="26" height="26"/>
+    <rect x="412" y="178" width="26" height="26"/>
+    <rect x="74" y="230" width="26" height="26"/>
+    <rect x="100" y="204" width="26" height="26"/>
+    <rect x="126" y="204" width="26" height="52"/>
+    <rect x="152" y="204" width="26" height="52"/>
+    <rect x="178" y="230" width="26" height="26"/>
+    <rect x="204" y="204" width="26" height="26"/>
+    <rect x="230" y="204" width="26" height="52"/>
+    <rect x="256" y="204" width="26" height="52"/>
+    <rect x="282" y="204" width="26" height="26"/>
+    <rect x="308" y="230" width="26" height="26"/>
+    <rect x="334" y="204" width="26" height="52"/>
+    <rect x="360" y="204" width="26" height="52"/>
+    <rect x="386" y="204" width="26" height="26"/>
+    <rect x="412" y="230" width="26" height="26"/>
+    <rect x="152" y="256" width="26" height="26"/>
+    <rect x="178" y="256" width="26" height="52"/>
+    <rect x="204" y="256" width="26" height="52"/>
+    <rect x="230" y="256" width="26" height="52"/>
+    <rect x="256" y="256" width="26" height="52"/>
+    <rect x="282" y="256" width="26" height="52"/>
+    <rect x="308" y="256" width="26" height="52"/>
+    <rect x="334" y="256" width="26" height="26"/>
+    <rect x="178" y="334" width="26" height="26"/>
+    <rect x="204" y="308" width="26" height="26"/>
+    <rect x="230" y="308" width="26" height="26"/>
+    <rect x="256" y="308" width="26" height="26"/>
+    <rect x="282" y="308" width="26" height="26"/>
+    <rect x="308" y="334" width="26" height="26"/>
+  </g>
+</svg>

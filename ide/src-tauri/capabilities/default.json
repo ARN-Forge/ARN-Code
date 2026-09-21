@@ -1,9 +1,10 @@
 {
-  "extends": "@tauri-apps/cli/schema/capabilities",
-  "capabilities": [
-    {
-      "name": "core:tauri:allow-dialog-open",
-      "permissions": ["dialog:open"]
-    }
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default permissions for ARN IDE",
+  "windows": [ "main" ],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open"
   ]
 }

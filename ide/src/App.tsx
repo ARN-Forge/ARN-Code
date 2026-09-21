@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import Editor from '@monaco-editor/react';
-import './App.css';
+import { AgentPanel } from './AgentPanel';
 
 interface FileTreeNode {
   name: string;
@@ -30,6 +30,29 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
 
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [projectError, setProjectError] = useState('');
+  const [switching, setSwitching] = useState(false);
+  const [projectVersion, setProjectVersion] = useState(0);
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const projectRef = useRef(projectRoot);
+  projectRef.current = projectRoot;
+  const refreshAgentFiles = async () => {
+    const root = projectRef.current;
+    if (!root) return;
+    await loadFileTree(root);
+    const updates = await Promise.all(tabsRef.current.map(async tab => {
+      if (tab.isDirty) return tab;
+      try {
+        const file = await invoke<FileContent>('read_file', {path:tab.path});
+        return {...tab, content:file.content};
+      } catch { return {...tab, isDirty:true}; } // Preserve deleted/unreadable buffers for recovery.
+    }));
+    if (projectRef.current !== root) return;
+    setTabs(current => current.map(tab => tab.isDirty ? tab : (updates.find(t => t.path === tab.path) || tab)));
+  };
+
   // Initialize
   useEffect(() => {
     invoke('get_project_root').then((root) => {
@@ -41,6 +64,7 @@ export default function App() {
   }, []);
 
   const selectProjectFolder = async () => {
+    if (tabs.some(tab => tab.isDirty) && !confirm('Discard unsaved tabs and change project?')) return;
     const selected = await open({
       directory: true,
       multiple: false,
@@ -49,19 +73,26 @@ export default function App() {
 
     if (selected) {
       const path = Array.isArray(selected) ? selected[0] : selected;
-      setProjectRoot(path);
-      await invoke('set_project_root', { path });
-      loadFileTree(path);
-      setTabs([]);
-      setActiveTab(null);
+      setSwitching(true); setProjectError('');
+      try {
+        const canonical = await invoke<string>('set_project_root', { path });
+        setProjectRoot(canonical);
+      } catch (error) {
+        setProjectError(String(error));
+        const root = await invoke<string | null>('get_project_root');
+        setProjectRoot(root);
+      }
+      setProjectVersion(v => v + 1);
+      await loadFileTree(path);
+      setTabs([]); setActiveTab(null); setAgentBusy(false); setSwitching(false);
     }
   };
 
-  const loadFileTree = async (root: string) => {
+  const loadFileTree = async (_root: string) => {
     try {
       const tree = (await invoke('list_files')) as FileTreeNode;
       setFileTree(tree);
-      setExpandedDirs(new Set([root]));
+      if (tree) setExpandedDirs(previous => new Set([...previous, tree.path]));
     } catch (error) {
       console.error('Failed to load file tree:', error);
     }
@@ -133,9 +164,10 @@ export default function App() {
   };
 
   const updateTabContent = (path: string, content: string) => {
+    if (agentBusy || switching) return;
     setTabs(
       tabs.map((t) =>
-        t.path === path ? { ...t, content, isDirty: true } : t
+        t.path === path && t.content !== content ? { ...t, content, isDirty: true } : t
       )
     );
   };
@@ -153,7 +185,7 @@ export default function App() {
   };
 
   const renderFileTree = (node: FileTreeNode, depth: number): React.ReactNode => {
-    if (!node.children) {
+    if (!node.is_dir) {
       // File
       return (
         <div
@@ -201,12 +233,13 @@ export default function App() {
   const activeTabData = tabs.find((t) => t.path === activeTab);
 
   return (
-    <div style={{ display: 'flex', height: '100vh', backgroundColor: '#1e1e1e', color: '#e0e0e0' }}>
+    <div style={{ display: 'flex', height: '100vh', backgroundColor: '#1e1e1e', color: '#e0e0e0', overflow: 'hidden' }}>
       {/* Sidebar */}
       <div style={{ width: '250px', borderRight: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '12px', borderBottom: '1px solid #333' }}>
           <button
             onClick={selectProjectFolder}
+            disabled={switching}
             style={{
               width: '100%',
               padding: '8px',
@@ -222,6 +255,7 @@ export default function App() {
           </button>
         </div>
 
+        {projectError && <p role="alert" style={{color:"#ff9c9c", padding:8}}>{projectError}</p>}
         {projectRoot && (
           <div style={{ padding: '8px', overflowY: 'auto', flex: 1, fontSize: '12px' }}>
             {fileTree && renderFileTree(fileTree, 0)}
@@ -291,7 +325,7 @@ export default function App() {
             <div style={{ display: 'flex', padding: '8px', borderBottom: '1px solid #333', gap: '8px' }}>
               <button
                 onClick={() => saveFile(activeTab!)}
-                disabled={!activeTabData.isDirty}
+                disabled={!activeTabData.isDirty || agentBusy || switching}
                 style={{
                   padding: '4px 12px',
                   backgroundColor: activeTabData.isDirty ? '#007acc' : '#333',
@@ -307,11 +341,13 @@ export default function App() {
             </div>
             <Editor
               height="100%"
+              path={activeTabData.path}
               defaultLanguage="text"
               value={activeTabData.content}
               onChange={(value) => updateTabContent(activeTab!, value || '')}
               theme="vs-dark"
               options={{
+                readOnly: agentBusy || switching,
                 minimap: { enabled: false },
                 fontSize: 12,
                 tabSize: 2,
@@ -332,6 +368,11 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Agent Panel */}
+      {!switching && <AgentPanel key={projectVersion} projectRoot={projectRoot || undefined}
+        dirtyPaths={tabs.filter(t => t.isDirty).map(t => t.path)} busy={agentBusy}
+        onBusyChange={setAgentBusy} onFilesChanged={refreshAgentFiles} />}
     </div>
   );
 }

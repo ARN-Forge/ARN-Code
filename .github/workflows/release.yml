@@ -92,11 +92,64 @@ jobs:
           path: ${{ matrix.archive }}
           if-no-files-found: error
 
+  ide-windows:
+    name: Package Windows IDE
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ide/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install OpenSSL
+        shell: pwsh
+        run: C:\vcpkg\vcpkg.exe install openssl:x64-windows
+      - name: Build C++ backend and tests
+        shell: pwsh
+        run: |
+          cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake"
+          cmake --build build --config Release --parallel
+          ctest --test-dir build -C Release --output-on-failure
+      - name: Install frontend dependencies
+        working-directory: ide
+        run: npm ci
+      - name: Test Rust bridge
+        shell: pwsh
+        run: |
+          $env:ARN_TEST_BIN = (Resolve-Path build/Release/arn_server_fixture.exe).Path
+          cargo test --locked --manifest-path ide/src-tauri/Cargo.toml
+      - name: Build IDE executable
+        working-directory: ide
+        run: npm run tauri -- build --no-bundle
+      - name: Package portable IDE
+        shell: pwsh
+        run: |
+          $package = "arn-ide-windows-x64"
+          New-Item -ItemType Directory -Force $package | Out-Null
+          Copy-Item "ide/src-tauri/target/release/arn-ide.exe" "$package/arn-ide.exe"
+          Copy-Item "build/Release/arn.exe" "$package/arn.exe"
+          Copy-Item "C:\vcpkg\installed\x64-windows\bin\libssl-3-x64.dll" $package
+          Copy-Item "C:\vcpkg\installed\x64-windows\bin\libcrypto-3-x64.dll" $package
+          Copy-Item "LICENSE", "README.md" $package
+          Copy-Item "docs/ide-arn-bridge.md" "$package/IDE-README.md"
+          Compress-Archive -Path "$package/*" -DestinationPath "arn-ide-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-arn-ide-windows-x64
+          path: arn-ide-windows-x64.zip
+          if-no-files-found: error
+
   release:
     name: Publish GitHub release
-    needs: build
+    needs: [build, ide-windows]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
@@ -107,5 +160,6 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: docs/releases/v0.5.0.md
           generate_release_notes: true
           files: dist/*
