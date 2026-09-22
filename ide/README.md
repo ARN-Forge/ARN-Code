@@ -40,6 +40,37 @@ npm run tauri -- build --no-bundle
 The executable is in `src-tauri/target/release`. For distribution it must be
 packaged with ARN and its runtime libraries; the release workflow does this.
 
+## Windows installer
+
+The branded NSIS installer uses Arny artwork, English/Ukrainian setup text,
+per-user installation, Start menu integration, optional desktop shortcut,
+upgrade handling and the Windows uninstaller. Missing WebView2 is downloaded
+from Microsoft during setup (internet required in that case).
+
+Build the C++ backend first, then run from `ide`:
+
+```powershell
+$env:CARGO_BUILD_JOBS = '1'
+$env:CARGO_PROFILE_DEV_DEBUG = '0'
+npm run installer:build
+npm run installer:test
+```
+
+Output: `src-tauri/target/release/bundle/nsis/ARN IDE_0.5.0_x64-setup.exe`.
+`ARN_BIN` can select the C++ executable; `ARN_RUNTIME_DIR` can supply DLL search
+directories separated by semicolons. The packager follows x64 PE imports and
+includes the matching OpenSSL and MSVC redistributable DLLs. It fails if a
+required dependency cannot be found. Runtime payloads are ignored by Git.
+
+Use `installer:build` for distribution; a raw `tauri build` does not stage
+the backend. The Windows release job uploads both the installer and portable ZIP.
+The installer is unsigned until a code-signing identity is configured; Windows
+may display an unknown-publisher warning. It does not request provider credentials.
+
+Regenerate the checked-in artwork with `./scripts/generate-installer-art.ps1`
+from the repository root. `installer/branding.nsh` customizes Tauri's maintained
+NSIS UI without replacing its installation and upgrade logic.
+
 ## Using the agent
 
 Open a project, verify your Gemini or DeepSeek API key, load the provider's

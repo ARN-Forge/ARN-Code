@@ -123,25 +123,45 @@ jobs:
         run: |
           $env:ARN_TEST_BIN = (Resolve-Path build/Release/arn_server_fixture.exe).Path
           cargo test --locked --manifest-path ide/src-tauri/Cargo.toml
-      - name: Build IDE executable
+      - name: Build branded Windows installer
         working-directory: ide
-        run: npm run tauri -- build --no-bundle
+        shell: pwsh
+        run: |
+          $env:ARN_BIN = (Resolve-Path ../build/Release/arn.exe).Path
+          $env:ARN_RUNTIME_DIR = 'C:\vcpkg\installed\x64-windows\bin'
+          npm run installer:build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test the actual installer payload
+        working-directory: ide
+        shell: pwsh
+        run: |
+          $setup = @(Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter '*-setup.exe')
+          if ($setup.Count -ne 1) { throw 'Expected exactly one Windows installer' }
+          7z x $setup[0].FullName '-osrc-tauri/target/installer-smoke' -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node ../tests/installer_runtime_test.mjs src-tauri/target/installer-smoke
       - name: Package portable IDE
         shell: pwsh
         run: |
           $package = "arn-ide-windows-x64"
           New-Item -ItemType Directory -Force $package | Out-Null
           Copy-Item "ide/src-tauri/target/release/arn-ide.exe" "$package/arn-ide.exe"
-          Copy-Item "build/Release/arn.exe" "$package/arn.exe"
-          Copy-Item "C:\vcpkg\installed\x64-windows\bin\libssl-3-x64.dll" $package
-          Copy-Item "C:\vcpkg\installed\x64-windows\bin\libcrypto-3-x64.dll" $package
+          $runtime = 'ide/src-tauri/installer/runtime'
+          foreach ($file in (Get-Content "$runtime/manifest.json" -Raw | ConvertFrom-Json)) {
+            Copy-Item (Join-Path $runtime $file) $package
+          }
           Copy-Item "LICENSE", "README.md" $package
           Copy-Item "docs/ide-arn-bridge.md" "$package/IDE-README.md"
           Compress-Archive -Path "$package/*" -DestinationPath "arn-ide-windows-x64.zip"
+          $installers = @(Get-ChildItem 'ide/src-tauri/target/release/bundle/nsis' -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) { throw 'Expected exactly one Windows installer' }
+          Copy-Item $installers[0].FullName 'arn-ide-windows-x64-setup.exe'
       - uses: actions/upload-artifact@v4
         with:
           name: release-arn-ide-windows-x64
-          path: arn-ide-windows-x64.zip
+          path: |
+            arn-ide-windows-x64.zip
+            arn-ide-windows-x64-setup.exe
           if-no-files-found: error
 
   release:

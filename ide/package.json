@@ -8,7 +8,10 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "installer:prepare": "node ../scripts/prepare-installer.mjs",
+    "installer:test": "node ../tests/installer_runtime_test.mjs",
+    "installer:build": "npm run installer:prepare && npm run installer:test && tauri build --bundles nsis --config src-tauri/installer/runtime/bundle-resources.json"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",

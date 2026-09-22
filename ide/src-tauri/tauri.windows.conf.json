@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["nsis"],
+    "publisher": "arnecto",
+    "copyright": "Copyright © 2026 arnecto. MIT License.",
+    "shortDescription": "Your code. Your next idea.",
+    "homepage": "https://github.com/arnecto/arn",
+    "licenseFile": "../../LICENSE",
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English", "Ukrainian"],
+        "displayLanguageSelector": true,
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "installer/header.bmp",
+        "sidebarImage": "installer/sidebar.bmp",
+        "installerHooks": "installer/branding.nsh",
+        "compression": "lzma"
+      }
+    }
+  }
+}

@@ -8,6 +8,7 @@ yarn-error.log*
 dist/
 src-tauri/target/
 src-tauri/gen/
+src-tauri/installer/runtime/
 
 # IDE
 .vscode/
