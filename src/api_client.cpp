@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -537,33 +538,146 @@ ApiResult gemini_prompt(const std::string& api_key, const std::string& model,
     return {false, "Stopped after too many tool calls."};
 }
 
+std::string lower_ascii(std::string value) {
+    std::ranges::transform(value, value.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+class DeepSeekProvider final : public ModelProvider {
+  public:
+    DeepSeekProvider() : client_("https://api.deepseek.com") {
+        client_.set_connection_timeout(10, 0);
+        client_.set_read_timeout(90, 0);
+        client_.set_keep_alive(true);
+    }
+
+    Provider kind() const noexcept override {
+        return Provider::deepseek;
+    }
+    std::string_view name() const noexcept override {
+        return "DeepSeek";
+    }
+    std::string preferred_model(const std::vector<std::string>& models) const override {
+        for (const auto candidate : {"deepseek-chat", "deepseek-reasoner"}) {
+            if (std::ranges::find(models, candidate) != models.end())
+                return candidate;
+        }
+        return models.empty() ? std::string{} : models.front();
+    }
+    ApiResult list_models(const std::string& api_key,
+                          const std::atomic_bool* cancel_requested) override {
+        return deepseek_models(api_key, client_, cancel_requested);
+    }
+    ApiResult submit_prompt(const std::string& api_key, const std::string& model,
+                            const std::string& prompt, const ToolExecutor& tools,
+                            const ToolExecutor::ConfirmationFn& confirm,
+                            const ProviderStreamCallback& on_text,
+                            const std::atomic_bool* cancel_requested,
+                            const ProviderStreamCallback& on_progress) override {
+        client_.set_read_timeout(90, 0);
+        return deepseek_prompt(api_key, model, prompt, tools, confirm, on_text, cancel_requested,
+                               messages_, client_, on_progress);
+    }
+    void cancel_active_request() override {
+        client_.stop();
+    }
+    void reset_session() override {
+        messages_ = json::array();
+    }
+    std::size_t session_entries() const noexcept override {
+        return messages_.size();
+    }
+
+  private:
+    httplib::Client client_;
+    json messages_ = json::array();
+};
+
+class GeminiProvider final : public ModelProvider {
+  public:
+    GeminiProvider() : client_("https://generativelanguage.googleapis.com") {
+        client_.set_connection_timeout(10, 0);
+        client_.set_read_timeout(90, 0);
+        client_.set_keep_alive(true);
+    }
+
+    Provider kind() const noexcept override {
+        return Provider::gemini;
+    }
+    std::string_view name() const noexcept override {
+        return "Gemini";
+    }
+    std::string preferred_model(const std::vector<std::string>& models) const override {
+        for (const auto candidate :
+             {"gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-3.5-flash",
+              "gemini-3.1-flash-lite", "gemini-3.1-flash", "gemini-2.5-flash"}) {
+            if (std::ranges::find(models, candidate) != models.end())
+                return candidate;
+        }
+        for (const auto& candidate : models) {
+            const auto model = lower_ascii(candidate);
+            if (model.find("gemini") != std::string::npos &&
+                model.find("flash") != std::string::npos &&
+                model.find("image") == std::string::npos &&
+                model.find("tts") == std::string::npos &&
+                model.find("transcribe") == std::string::npos)
+                return candidate;
+        }
+        return models.empty() ? std::string{} : models.front();
+    }
+    ApiResult list_models(const std::string& api_key,
+                          const std::atomic_bool* cancel_requested) override {
+        return gemini_models(api_key, client_, cancel_requested);
+    }
+    ApiResult submit_prompt(const std::string& api_key, const std::string& model,
+                            const std::string& prompt, const ToolExecutor& tools,
+                            const ToolExecutor::ConfirmationFn& confirm,
+                            const ProviderStreamCallback& on_text,
+                            const std::atomic_bool* cancel_requested,
+                            const ProviderStreamCallback& on_progress) override {
+        client_.set_read_timeout(90, 0);
+        return gemini_prompt(api_key, model, prompt, tools, confirm, on_text, cancel_requested,
+                             contents_, client_, on_progress);
+    }
+    void cancel_active_request() override {
+        client_.stop();
+    }
+    void reset_session() override {
+        contents_ = json::array();
+    }
+    std::size_t session_entries() const noexcept override {
+        return contents_.size();
+    }
+
+  private:
+    httplib::Client client_;
+    json contents_ = json::array();
+};
+
 } // namespace
 
-std::string provider_name(Provider provider) {
+std::unique_ptr<ModelProvider> make_provider(Provider provider) {
     switch (provider) {
     case Provider::deepseek:
-        return "DeepSeek";
+        return std::make_unique<DeepSeekProvider>();
     case Provider::gemini:
-        return "Gemini";
+        return std::make_unique<GeminiProvider>();
     case Provider::none:
-        return "none";
+        return {};
     }
-    return "unknown";
+    return {};
 }
 
 ApiClient::~ApiClient() = default;
 
-httplib::Client& ApiClient::client_for(Provider provider) {
-    auto& client = provider == Provider::deepseek ? deepseek_client_ : gemini_client_;
-    if (!client) {
-        client = std::make_unique<httplib::Client>(
-            provider == Provider::deepseek ? "https://api.deepseek.com"
-                                           : "https://generativelanguage.googleapis.com");
-        client->set_connection_timeout(10, 0);
-        client->set_read_timeout(90, 0);
-        client->set_keep_alive(true);
-    }
-    return *client;
+ModelProvider* ApiClient::provider_for(Provider provider) {
+    if (provider == Provider::none)
+        return nullptr;
+    auto& implementation = providers_[provider];
+    if (!implementation)
+        implementation = make_provider(provider);
+    return implementation.get();
 }
 
 ApiResult ApiClient::list_models(Provider provider, const std::string& api_key,
@@ -572,10 +686,12 @@ ApiResult ApiClient::list_models(Provider provider, const std::string& api_key,
         return {false, "The API key cannot be empty."};
     if (provider == Provider::none)
         return {false, "Select a provider first."};
-    auto& http_client = client_for(provider);
+    auto* implementation = provider_for(provider);
+    if (!implementation)
+        return {false, "Select a provider first."};
     {
         std::lock_guard lock(active_request_mutex_);
-        active_request_client_ = &http_client;
+        active_request_provider_ = implementation;
     }
     struct Cleanup {
         std::function<void()> action;
@@ -584,13 +700,11 @@ ApiResult ApiClient::list_models(Provider provider, const std::string& api_key,
         }
     } cleanup{[&] {
         std::lock_guard lock(active_request_mutex_);
-        active_request_client_ = nullptr;
+        active_request_provider_ = nullptr;
     }};
     if (cancel_requested && cancel_requested->load())
         return {false, "Request cancelled.", {}, true};
-    if (provider == Provider::deepseek)
-        return deepseek_models(api_key, http_client, cancel_requested);
-    return gemini_models(api_key, http_client, cancel_requested);
+    return implementation->list_models(api_key, cancel_requested);
 }
 
 ApiResult ApiClient::submit_prompt(Provider provider, const std::string& api_key,
@@ -611,10 +725,12 @@ ApiResult ApiClient::submit_prompt(Provider provider, const std::string& api_key
         session_provider_ = provider;
         session_model_ = model;
     }
-    auto& http_client = client_for(provider);
+    auto* implementation = provider_for(provider);
+    if (!implementation)
+        return {false, "Select a provider first."};
     {
         std::lock_guard lock(active_request_mutex_);
-        active_request_client_ = &http_client;
+        active_request_provider_ = implementation;
     }
 
     struct Cleanup {
@@ -624,42 +740,37 @@ ApiResult ApiClient::submit_prompt(Provider provider, const std::string& api_key
         }
     } cleanup{[&] {
         std::lock_guard lock(active_request_mutex_);
-        active_request_client_ = nullptr;
+        active_request_provider_ = nullptr;
     }};
-    http_client.set_read_timeout(90, 0);
-    ApiResult result;
-    if (provider == Provider::deepseek) {
-        result = deepseek_prompt(api_key, model, prompt, tools, confirm, on_text, cancel_requested,
-                                 deepseek_messages_, http_client, on_progress);
-    } else if (provider == Provider::gemini) {
-        result = gemini_prompt(api_key, model, prompt, tools, confirm, on_text, cancel_requested,
-                               gemini_contents_, http_client, on_progress);
-    } else {
-        result = {false, "Select a provider first."};
-    }
-    {
-        std::lock_guard lock(active_request_mutex_);
-        active_request_client_ = nullptr;
-    }
-    return result;
+    return implementation->submit_prompt(api_key, model, prompt, tools, confirm, on_text,
+                                         cancel_requested, on_progress);
 }
 
 void ApiClient::cancel_active_request() {
     std::lock_guard lock(active_request_mutex_);
-    if (active_request_client_)
-        active_request_client_->stop();
+    if (active_request_provider_)
+        active_request_provider_->cancel_active_request();
 }
 
 void ApiClient::reset_session() {
     session_provider_ = Provider::none;
     session_model_.clear();
-    deepseek_messages_ = json::array();
-    gemini_contents_ = json::array();
+    for (auto& [provider, implementation] : providers_) {
+        (void)provider;
+        implementation->reset_session();
+    }
 }
 
 std::size_t ApiClient::session_entries() const noexcept {
-    return session_provider_ == Provider::deepseek ? deepseek_messages_.size()
-                                                   : gemini_contents_.size();
+    if (session_provider_ == Provider::none)
+        return 0;
+    const auto implementation = providers_.find(session_provider_);
+    return implementation == providers_.end() ? 0 : implementation->second->session_entries();
+}
+
+std::string ApiClient::preferred_model(Provider provider, const std::vector<std::string>& models) {
+    const auto* implementation = provider_for(provider);
+    return implementation ? implementation->preferred_model(models) : std::string{};
 }
 
 } // namespace arn

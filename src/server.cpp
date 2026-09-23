@@ -43,9 +43,7 @@ struct Server {
             models.clear();
             client.reset_session();
             const auto name = cmd.value("provider", "");
-            const auto next = name == "gemini"     ? Provider::gemini
-                              : name == "deepseek" ? Provider::deepseek
-                                                   : Provider::none;
+            const auto next = provider_from_name(name);
             const auto secret = cmd.value("apiKey", "");
             if (next == Provider::none || secret.empty())
                 return {{"type", "error"},

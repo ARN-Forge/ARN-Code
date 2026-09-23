@@ -1,32 +1,18 @@
 #pragma once
 
 #include <atomic>
-#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <string_view>
-#include <vector>
 
-#include <httplib.h>
-#include <nlohmann/json.hpp>
-
-#include "tool_executor.hpp"
+#include "model_provider.hpp"
 
 namespace arn {
 
-enum class Provider { none, deepseek, gemini };
-
-struct ApiResult {
-    bool ok{};
-    std::string message;
-    std::vector<std::string> models;
-    bool cancelled{};
-};
-
 class ApiClient {
   public:
-    using StreamCallback = std::function<void(std::string_view text)>;
+    using StreamCallback = ProviderStreamCallback;
     ApiClient() = default;
     ~ApiClient();
 
@@ -35,6 +21,8 @@ class ApiClient {
 
     [[nodiscard]] ApiResult list_models(Provider provider, const std::string& api_key,
                                         const std::atomic_bool* cancel_requested = nullptr);
+    [[nodiscard]] std::string preferred_model(Provider provider,
+                                              const std::vector<std::string>& models);
     [[nodiscard]] ApiResult submit_prompt(Provider provider, const std::string& api_key,
                                           const std::string& model, const std::string& prompt,
                                           const ToolExecutor& tools,
@@ -50,16 +38,11 @@ class ApiClient {
   private:
     Provider session_provider_{Provider::none};
     std::string session_model_;
-    nlohmann::json deepseek_messages_ = nlohmann::json::array();
-    nlohmann::json gemini_contents_ = nlohmann::json::array();
-    std::unique_ptr<httplib::Client> deepseek_client_;
-    std::unique_ptr<httplib::Client> gemini_client_;
+    std::map<Provider, std::unique_ptr<ModelProvider>> providers_;
     std::mutex active_request_mutex_;
-    httplib::Client* active_request_client_{};
+    ModelProvider* active_request_provider_{};
 
-    [[nodiscard]] httplib::Client& client_for(Provider provider);
+    [[nodiscard]] ModelProvider* provider_for(Provider provider);
 };
-
-[[nodiscard]] std::string provider_name(Provider provider);
 
 } // namespace arn

@@ -57,6 +57,15 @@ if (BUILD_TESTING)
     target_include_directories(model_list_test PRIVATE include)
     target_link_libraries(model_list_test PRIVATE nlohmann_json::nlohmann_json)
     add_test(NAME model_list COMMAND model_list_test)
+    add_executable(model_provider_test tests/model_provider_test.cpp src/api_client.cpp
+                                       src/tool_executor.cpp)
+    target_include_directories(model_provider_test PRIVATE include)
+    target_link_libraries(model_provider_test PRIVATE nlohmann_json::nlohmann_json
+                                                      httplib::httplib Threads::Threads)
+    add_test(NAME model_provider COMMAND model_provider_test)
+    if (MSVC)
+        target_compile_options(model_provider_test PRIVATE /utf-8)
+    endif()
 endif()
 
 if (BUILD_TESTING)

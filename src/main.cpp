@@ -245,24 +245,6 @@ std::string normalize_command(std::string input) {
     return input;
 }
 
-std::string preferred_model(arn::Provider provider, const std::vector<std::string>& models) {
-    const std::vector<std::string_view> preferred = provider == arn::Provider::gemini
-        ? std::vector<std::string_view>{"gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.1-flash", "gemini-2.5-flash"}
-        : std::vector<std::string_view>{"deepseek-chat", "deepseek-reasoner"};
-    for (const auto candidate : preferred) {
-        if (std::ranges::find(models, candidate) != models.end()) return std::string(candidate);
-    }
-    if (provider == arn::Provider::gemini) {
-        for (const auto& candidate : models) {
-            const auto name = lower_ascii(candidate);
-            if (name.find("gemini") != std::string::npos && name.find("flash") != std::string::npos
-                && name.find("image") == std::string::npos && name.find("tts") == std::string::npos
-                && name.find("transcribe") == std::string::npos) return candidate;
-        }
-    }
-    return models.empty() ? std::string{} : models.front();
-}
-
 void erase_last_utf8_character(std::string& text) {
     if (text.empty()) return;
     auto position = text.size() - 1;
@@ -304,8 +286,6 @@ std::string read_line(Ui& ui, arn::TerminalSession& terminal) {
         ui.render_input();
     }
 }
-
-arn::Provider provider_from_name(const std::string& value) { return value == "gemini" ? arn::Provider::gemini : value == "deepseek" ? arn::Provider::deepseek : arn::Provider::none; }
 
 int run() {
     arn::TerminalSession terminal;
@@ -350,7 +330,7 @@ int run() {
         else if (command == "/clear-session") { client.reset_session(); ui.add(Tone::good, "Chat context cleared. Key and model are unchanged."); }
         else if (command == "/models") { if (models.empty()) ui.add(Tone::warning, "No verified API key is active."); else for (const auto& name : models) ui.add(Tone::normal, "• " + name); }
         else if (command == "/provider") {
-            const auto selected = provider_from_name(lower_ascii(argument));
+            const auto selected = arn::provider_from_name(lower_ascii(argument));
             if (selected == arn::Provider::none) ui.add(Tone::warning, "Supported providers: gemini, deepseek");
             else { provider = selected; key.clear(); model.clear(); models.clear(); client.reset_session(); ui.add(Tone::good, "Active provider: " + arn::provider_name(provider)); }
         } else if (command == "/key-gemini" || command == "/key-deepseek") {
@@ -358,7 +338,7 @@ int run() {
             ui.status("Verifying API key…"); refresh();
             const auto result = client.list_models(selected, remove_quotes(argument));
             if (!result.ok || result.models.empty()) ui.add(Tone::error, "Key was not saved: " + (result.ok ? "no text-generation models are available." : result.message));
-            else { provider = selected; key = remove_quotes(argument); models = result.models; model = preferred_model(provider, models); client.reset_session(); ui.add(Tone::good, "Connected to " + arn::provider_name(provider) + ". Default model: " + model); }
+            else { provider = selected; key = remove_quotes(argument); models = result.models; model = client.preferred_model(provider, models); client.reset_session(); ui.add(Tone::good, "Connected to " + arn::provider_name(provider) + ". Default model: " + model); }
         } else if (command == "/model") {
             const auto selected = remove_quotes(argument);
             if (std::ranges::find(models, selected) == models.end()) ui.add(Tone::warning, "That model is not in the active provider list. Use /models.");
