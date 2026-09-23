@@ -28,18 +28,8 @@ struct ConfirmationRequest {
           arguments(std::move(args_in)),
           summary(std::move(summary_in)),
           changes_state(changes_state_in),
-          changes_files(changes_files_in),
+          changes_files(changes_files_in || changes_state_in),
           preview(std::move(preview_in)) {}
-
-    ConfirmationRequest(std::string name_in,
-                        nlohmann::json args_in,
-                        std::string summary_in,
-                        bool changes_files_in)
-        : name(std::move(name_in)),
-          arguments(std::move(args_in)),
-          summary(std::move(summary_in)),
-          changes_state(changes_files_in),
-          changes_files(changes_files_in) {}
 
     [[nodiscard]] const std::string& tool_name() const noexcept { return name; }
 };

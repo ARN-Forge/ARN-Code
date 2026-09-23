@@ -39,21 +39,33 @@ public:
     list_models(const std::string& api_key,
                 const std::atomic_bool* cancel_requested = nullptr) override;
 
-    [[nodiscard]] ApiResult
-    submit_prompt(const std::string& api_key, const std::string& model,
-                  const std::string& system_instruction, const std::string& user_prompt,
-                  const ToolRegistry& tools, const ConfirmationFn& confirm,
-                  const TextStreamCallback& on_text = {},
-                  const std::atomic_bool* cancel_requested = nullptr,
-                  const ProgressCallback& on_progress = {}) override;
+    [[nodiscard]] ModelTurn
+    start_turn(const std::string& api_key, const std::string& model,
+               const std::string& system_instruction, const std::string& user_prompt,
+               const ToolRegistry& tools,
+               const StreamCallbacks& callbacks = {},
+               const std::atomic_bool* cancel_requested = nullptr) override;
 
-    using IModelProvider::submit_prompt;
+    [[nodiscard]] ModelTurn
+    continue_turn(const std::string& api_key, const std::string& model,
+                  const std::string& system_instruction,
+                  const std::vector<ToolResponse>& tool_responses,
+                  const ToolRegistry& tools,
+                  const StreamCallbacks& callbacks = {},
+                  const std::atomic_bool* cancel_requested = nullptr) override;
 
+    void trim_history(std::size_t max_entries) override;
     void cancel_active_request() override;
     void reset_session() override;
     [[nodiscard]] std::size_t session_entries() const noexcept override;
 
 private:
+    [[nodiscard]] ModelTurn
+    execute_turn_request(const std::string& api_key, const std::string& model,
+                         const ToolRegistry& tools,
+                         const StreamCallbacks& callbacks,
+                         const std::atomic_bool* cancel_requested);
+
     std::string endpoint_;
     std::unique_ptr<httplib::Client> client_;
     nlohmann::json messages_ = nlohmann::json::array();

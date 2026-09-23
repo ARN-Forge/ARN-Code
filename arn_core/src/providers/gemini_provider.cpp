@@ -69,90 +69,114 @@ ApiResult GeminiProvider::list_models(const std::string& api_key,
     }
 }
 
-ApiResult GeminiProvider::submit_prompt(
+void GeminiProvider::trim_history(std::size_t max_entries) {
+    while (contents_.size() > max_entries) {
+        contents_.erase(contents_.begin());
+    }
+}
+
+ModelTurn GeminiProvider::start_turn(
     const std::string& api_key, const std::string& model,
     const std::string& system_instruction, const std::string& user_prompt,
-    const ToolRegistry& tools, const ConfirmationFn& confirm,
-    const TextStreamCallback& on_text,
-    const std::atomic_bool* cancel_requested,
-    const ProgressCallback& on_progress) {
+    const ToolRegistry& tools,
+    const StreamCallbacks& callbacks,
+    const std::atomic_bool* cancel_requested) {
+
+    contents_.push_back({{"role", "user"}, {"parts", {{{"text", user_prompt}}}}});
+    return execute_turn_request(api_key, model, system_instruction, tools, callbacks, cancel_requested);
+}
+
+ModelTurn GeminiProvider::continue_turn(
+    const std::string& api_key, const std::string& model,
+    const std::string& system_instruction,
+    const std::vector<ToolResponse>& tool_responses,
+    const ToolRegistry& tools,
+    const StreamCallbacks& callbacks,
+    const std::atomic_bool* cancel_requested) {
+
+    nlohmann::json response_parts = nlohmann::json::array();
+    for (const auto& resp : tool_responses) {
+        response_parts.push_back({
+            {"functionResponse", {
+                {"name", resp.name},
+                {"id", resp.call_id},
+                {"response", resp.result}
+            }}
+        });
+    }
+    contents_.push_back({{"role", "user"}, {"parts", std::move(response_parts)}});
+    return execute_turn_request(api_key, model, system_instruction, tools, callbacks, cancel_requested);
+}
+
+ModelTurn GeminiProvider::execute_turn_request(
+    const std::string& api_key, const std::string& model,
+    const std::string& system_instruction,
+    const ToolRegistry& tools,
+    const StreamCallbacks& callbacks,
+    const std::atomic_bool* cancel_requested) {
 
     if (!client_)
-        return {false, "Client not initialized."};
+        return {.ok = false, .error_message = "Client not initialized."};
+    if (cancel_requested && cancel_requested->load())
+        return {.ok = false, .error_message = "Request cancelled.", .cancelled = true};
+
     client_->set_read_timeout(90, 0);
-    contents_.push_back({{"role", "user"}, {"parts", {{{"text", user_prompt}}}}});
-    detail::trim_history(contents_, 0);
 
-    for (int round = 0; round < detail::max_tool_rounds; ++round) {
-        if (cancel_requested && cancel_requested->load())
-            return {false, "Request cancelled.", {}, true};
+    const auto payload = detail::build_gemini_payload(system_instruction, contents_, tools);
 
-        const auto payload = detail::build_gemini_payload(system_instruction, contents_, tools);
+    std::string text;
+    nlohmann::json function_calls = nlohmann::json::array();
+    nlohmann::json model_response_parts = nlohmann::json::array();
+    std::string error_body;
+    bool received_event = false;
 
-        std::string text;
-        nlohmann::json function_calls = nlohmann::json::array();
-        // Gemini 3 can attach thoughtSignature to the Part containing a
-        // function call. Preserve every raw Part for the next API turn.
-        nlohmann::json model_response_parts = nlohmann::json::array();
-        std::string error_body;
-        bool received_event = false;
+    const auto response = net::execute_stream_with_retry(
+        [&] {
+            return net::stream_post(
+                *client_, "/v1beta/models/" + model + ":streamGenerateContent?alt=sse",
+                {{"x-goog-api-key", api_key}}, payload.dump(),
+                [&](std::string_view event) {
+                    detail::parse_gemini_stream_chunk(event, text, model_response_parts,
+                                                      function_calls, callbacks.on_text);
+                },
+                error_body, received_event, cancel_requested);
+        },
+        received_event, cancel_requested, callbacks.on_progress);
 
-        const auto response = net::execute_stream_with_retry(
-            [&] {
-                return net::stream_post(
-                    *client_, "/v1beta/models/" + model + ":streamGenerateContent?alt=sse",
-                    {{"x-goog-api-key", api_key}}, payload.dump(),
-                    [&](std::string_view event) {
-                        detail::parse_gemini_stream_chunk(event, text, model_response_parts,
-                                                          function_calls, on_text);
-                    },
-                    error_body, received_event, cancel_requested);
-            },
-            received_event, cancel_requested, on_progress);
-
-        if (cancel_requested && cancel_requested->load(std::memory_order_relaxed)) {
-            return {false, "Request cancelled.", {}, true};
-        }
-        if (!response)
-            return {false, "Network request failed: " + httplib::to_string(response.error())};
-        if (response->status < 200 || response->status >= 300)
-            return detail::parse_error(response->status, "Gemini", error_body);
-
-        try {
-            if (model_response_parts.empty())
-                return {false, "Gemini returned an empty streamed response."};
-
-            contents_.push_back({{"role", "model"}, {"parts", model_response_parts}});
-
-            nlohmann::json response_parts = nlohmann::json::array();
-            for (const auto& call : function_calls) {
-                if (cancel_requested && cancel_requested->load())
-                    return {false, "Request cancelled.", {}, true};
-                const auto tool_name = call.at("name").get<std::string>();
-                if (on_progress)
-                    on_progress("Running project tool: " + tool_name);
-
-                const ToolContext context{
-                    .cancel_requested = cancel_requested,
-                    .confirm = confirm
-                };
-                const auto execution = tools.execute(tool_name, call.value("args", nlohmann::json::object()), context);
-                response_parts.push_back({{"functionResponse",
-                                           {{"name", tool_name},
-                                            {"id", call.value("id", "")},
-                                            {"response", execution.result}}}});
-            }
-
-            if (function_calls.empty())
-                return {true, text};
-
-            contents_.push_back({{"role", "user"}, {"parts", std::move(response_parts)}});
-        } catch (const std::exception& exception) {
-            return {false, "Could not read the API response: " + std::string(exception.what())};
-        }
+    if (cancel_requested && cancel_requested->load(std::memory_order_relaxed)) {
+        return {.ok = false, .error_message = "Request cancelled.", .cancelled = true};
+    }
+    if (!response) {
+        return {.ok = false, .error_message = "Network request failed: " + httplib::to_string(response.error())};
+    }
+    if (response->status < 200 || response->status >= 300) {
+        const auto parsed_err = detail::parse_error(response->status, "Gemini", error_body);
+        return {.ok = false, .error_message = parsed_err.message};
     }
 
-    return {false, "Stopped after too many tool calls."};
+    try {
+        if (model_response_parts.empty())
+            return {.ok = false, .error_message = "Gemini returned an empty streamed response."};
+
+        contents_.push_back({{"role", "model"}, {"parts", model_response_parts}});
+
+        std::vector<ToolCall> calls;
+        for (const auto& fc : function_calls) {
+            calls.push_back(ToolCall{
+                .id = fc.value("id", ""),
+                .name = fc.at("name").get<std::string>(),
+                .arguments = fc.value("args", nlohmann::json::object())
+            });
+        }
+
+        return {
+            .ok = true,
+            .text = std::move(text),
+            .tool_calls = std::move(calls)
+        };
+    } catch (const std::exception& exception) {
+        return {.ok = false, .error_message = "Could not read the API response: " + std::string(exception.what())};
+    }
 }
 
 void GeminiProvider::cancel_active_request() {

@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include <nlohmann/json.hpp>
 #include "arn/core/confirmation/confirmation_request.hpp"
 #include "arn/core/tool/tool_registry.hpp"
 
@@ -58,6 +59,26 @@ struct StreamCallbacks {
     ProgressCallback on_progress;
 };
 
+struct ToolCall {
+    std::string id;
+    std::string name;
+    nlohmann::json arguments;
+};
+
+struct ToolResponse {
+    std::string call_id;
+    std::string name;
+    nlohmann::json result;
+};
+
+struct ModelTurn {
+    bool ok{false};
+    std::string text;
+    std::vector<ToolCall> tool_calls;
+    std::string error_message;
+    bool cancelled{false};
+};
+
 class IModelProvider {
 public:
     virtual ~IModelProvider() = default;
@@ -70,13 +91,36 @@ public:
     [[nodiscard]] virtual ApiResult list_models(const std::string& api_key,
                                                 const std::atomic_bool* cancel_requested = nullptr) = 0;
 
+    // Single-turn model generation step initiated by user input
+    [[nodiscard]] virtual ModelTurn
+    start_turn(const std::string& api_key, const std::string& model,
+               const std::string& system_instruction, const std::string& user_prompt,
+               const ToolRegistry& tools,
+               const StreamCallbacks& callbacks = {},
+               const std::atomic_bool* cancel_requested = nullptr) = 0;
+
+    // Continuation of an active turn feeding back tool execution responses
+    [[nodiscard]] virtual ModelTurn
+    continue_turn(const std::string& api_key, const std::string& model,
+                  const std::string& system_instruction,
+                  const std::vector<ToolResponse>& tool_responses,
+                  const ToolRegistry& tools,
+                  const StreamCallbacks& callbacks = {},
+                  const std::atomic_bool* cancel_requested = nullptr) = 0;
+
+    virtual void trim_history(std::size_t max_entries) = 0;
+    virtual void cancel_active_request() = 0;
+    virtual void reset_session() = 0;
+    [[nodiscard]] virtual std::size_t session_entries() const noexcept = 0;
+
+    // Convenience / backward compatibility: executes a full prompt turn loop via AgentSession
     [[nodiscard]] virtual ApiResult
     submit_prompt(const std::string& api_key, const std::string& model,
                   const std::string& system_instruction, const std::string& user_prompt,
                   const ToolRegistry& tools, const ConfirmationFn& confirm,
                   const TextStreamCallback& on_text = {},
                   const std::atomic_bool* cancel_requested = nullptr,
-                  const ProgressCallback& on_progress = {}) = 0;
+                  const ProgressCallback& on_progress = {});
 
     [[nodiscard]] virtual ApiResult
     submit_prompt(const std::string& api_key, const std::string& model,
@@ -87,10 +131,6 @@ public:
         return submit_prompt(api_key, model, system_instruction, user_prompt, tools, confirm,
                              callbacks.on_text, cancel_requested, callbacks.on_progress);
     }
-
-    virtual void cancel_active_request() = 0;
-    virtual void reset_session() = 0;
-    [[nodiscard]] virtual std::size_t session_entries() const noexcept = 0;
 
     // Backward compatibility helper matching legacy kind()
     [[nodiscard]] ProviderType kind() const noexcept { return type(); }

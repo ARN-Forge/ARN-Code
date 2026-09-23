@@ -8,9 +8,11 @@ add_library(arn_core
     src/net/model_parser.cpp
     src/tool/tool_registry.cpp
     src/providers/provider_utils.cpp
+    src/providers/model_provider.cpp
     src/providers/gemini_provider.cpp
     src/providers/deepseek_provider.cpp
     src/providers/provider_factory.cpp
+    src/agent/agent_session.cpp
 )
 
 add_library(arn::core ALIAS arn_core)
@@ -54,10 +56,16 @@ if (BUILD_TESTING)
     target_link_libraries(arn_core_provider_test PRIVATE arn::core)
     add_test(NAME arn_core_provider COMMAND arn_core_provider_test)
 
+    add_executable(arn_core_agent_session_test tests/agent_session_test.cpp)
+    target_include_directories(arn_core_agent_session_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(arn_core_agent_session_test PRIVATE arn::core)
+    add_test(NAME arn_core_agent_session COMMAND arn_core_agent_session_test)
+
     if (MSVC)
         target_compile_options(arn_core_sse_test PRIVATE /utf-8)
         target_compile_options(arn_core_retry_test PRIVATE /utf-8)
         target_compile_options(arn_core_tool_registry_test PRIVATE /utf-8)
         target_compile_options(arn_core_provider_test PRIVATE /utf-8)
+        target_compile_options(arn_core_agent_session_test PRIVATE /utf-8)
     endif()
 endif()
