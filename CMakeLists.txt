@@ -31,7 +31,37 @@ find_package(Threads REQUIRED)
 
 include(CTest)
 
-add_subdirectory(arn_core)
+# ARN Core dependency (v0.1.0)
+# Supports:
+# 1. Local development: checks ARN_CORE_SOURCE_DIR or adjacent ../arn-core repository
+# 2. Installed package: find_package(arn_core 0.1.0 CONFIG QUIET)
+# 3. Remote/CI fallback: FetchContent from https://github.com/arnecto/arn-core.git @ v0.1.0
+
+set(ARN_CORE_SOURCE_DIR "" CACHE PATH "Path to standalone arn-core repository")
+
+if (NOT ARN_CORE_SOURCE_DIR AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../arn-core/CMakeLists.txt")
+    set(ARN_CORE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../arn-core")
+endif()
+
+if (ARN_CORE_SOURCE_DIR)
+    message(STATUS "Consuming ARN Core from local source: ${ARN_CORE_SOURCE_DIR}")
+    add_subdirectory("${ARN_CORE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/arn_core_subproject")
+else()
+    find_package(arn_core 0.1.0 CONFIG QUIET)
+    if (arn_core_FOUND)
+        message(STATUS "Found installed arn_core: ${arn_core_DIR}")
+    else()
+        message(STATUS "Fetching arn_core v0.1.0 from https://github.com/arnecto/arn-core.git")
+        FetchContent_Declare(
+            arn_core
+            GIT_REPOSITORY https://github.com/arnecto/arn-core.git
+            GIT_TAG v0.1.0
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_MakeAvailable(arn_core)
+    endif()
+endif()
+
 
 if (WIN32)
     set(ARN_TERMINAL_SOURCE src/terminal_windows.cpp)
@@ -90,7 +120,14 @@ if (BUILD_TESTING)
         set_tests_properties(server_protocol PROPERTIES TIMEOUT 30)
     endif()
     add_executable(architecture_test tests/architecture_test.cpp)
-    target_compile_definitions(architecture_test PRIVATE REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+    if (TARGET arn_core)
+        get_target_property(ARN_CORE_SOURCE_DIR_PROP arn_core SOURCE_DIR)
+        target_compile_definitions(architecture_test PRIVATE ARN_CORE_DIR="${ARN_CORE_SOURCE_DIR_PROP}")
+    elseif (DEFINED ARN_CORE_SOURCE_DIR AND ARN_CORE_SOURCE_DIR)
+        target_compile_definitions(architecture_test PRIVATE ARN_CORE_DIR="${ARN_CORE_SOURCE_DIR}")
+    elseif (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../arn-core")
+        target_compile_definitions(architecture_test PRIVATE ARN_CORE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../arn-core")
+    endif()
     target_link_libraries(architecture_test PRIVATE arn::core)
     add_test(NAME architecture_boundary COMMAND architecture_test)
 

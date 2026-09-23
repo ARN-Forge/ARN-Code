@@ -36,8 +36,7 @@ std::string read_file_content(const std::filesystem::path& path) {
     return ss.str();
 }
 
-void test_core_isolation(const std::filesystem::path& repo_root) {
-    const auto core_dir = repo_root / "arn_core";
+void test_core_isolation(const std::filesystem::path& core_dir) {
     check(std::filesystem::exists(core_dir), "arn_core directory must exist at " + core_dir.string());
 
     // Match any includes of ARN application headers without arn/core prefix
@@ -117,21 +116,22 @@ void test_non_coding_consumer() {
 } // namespace
 
 int main(int argc, char** argv) {
-    std::filesystem::path repo_root;
-#ifdef REPO_ROOT
-    repo_root = REPO_ROOT;
+    std::filesystem::path core_dir;
+#ifdef ARN_CORE_DIR
+    core_dir = ARN_CORE_DIR;
 #else
     if (argc > 1) {
-        repo_root = argv[1];
+        core_dir = argv[1];
     } else {
-        repo_root = std::filesystem::current_path();
-        if (!std::filesystem::exists(repo_root / "arn_core"))
-            repo_root = repo_root.parent_path();
+        core_dir = std::filesystem::current_path() / "arn_core";
+        if (!std::filesystem::exists(core_dir)) {
+            core_dir = std::filesystem::current_path().parent_path() / "arn-core";
+        }
     }
 #endif
 
     try {
-        test_core_isolation(repo_root);
+        test_core_isolation(core_dir);
         test_non_coding_consumer();
         std::cout << "All architectural boundary checks passed!\n";
         return 0;
