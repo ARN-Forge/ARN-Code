@@ -29,6 +29,8 @@ FetchContent_MakeAvailable(nlohmann_json cpp_httplib)
 
 find_package(Threads REQUIRED)
 
+add_subdirectory(arn_core)
+
 if (WIN32)
     set(ARN_TERMINAL_SOURCE src/terminal_windows.cpp)
 else()
@@ -46,7 +48,7 @@ add_executable(arn
 
 target_include_directories(arn PRIVATE include)
 target_compile_definitions(arn PRIVATE ARN_VERSION="${PROJECT_VERSION}")
-target_link_libraries(arn PRIVATE nlohmann_json::nlohmann_json httplib::httplib Threads::Threads)
+target_link_libraries(arn PRIVATE arn::core nlohmann_json::nlohmann_json httplib::httplib Threads::Threads)
 if (MSVC)
     target_compile_options(arn PRIVATE /utf-8)
 endif()
