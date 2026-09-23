@@ -52,6 +52,7 @@ public:
     [[nodiscard]] std::string preferred_model() const;
     void select_model(std::string model);
     [[nodiscard]] std::string active_model() const;
+    [[nodiscard]] ModelCapabilities model_capabilities() const;
 
     [[nodiscard]] ApiResult prompt(std::string_view text,
                                    const StreamCallbacks& callbacks = {},

@@ -83,13 +83,22 @@ int main() {
         check(deepseek->name() == "DeepSeek", "DeepSeek name mismatch");
         check(deepseek->session_entries() == 0, "DeepSeek session must start empty");
 
+        auto openrouter = arn::core::create_provider(arn::core::ProviderType::openrouter);
+        check(openrouter != nullptr, "OpenRouter provider creation failed");
+        check(openrouter->type() == arn::core::ProviderType::openrouter, "OpenRouter type mismatch");
+        check(openrouter->kind() == arn::core::ProviderType::openrouter, "OpenRouter kind mismatch");
+        check(openrouter->name() == "OpenRouter", "OpenRouter name mismatch");
+        check(openrouter->session_entries() == 0, "OpenRouter session must start empty");
+
         check(arn::core::provider_type_name(arn::core::ProviderType::gemini) == "Gemini", "Name check");
         check(arn::core::provider_type_name(arn::core::ProviderType::deepseek) == "DeepSeek", "Name check");
+        check(arn::core::provider_type_name(arn::core::ProviderType::openrouter) == "OpenRouter", "Name check");
         check(arn::core::provider_type_name(arn::core::ProviderType::custom) == "Custom", "Name check");
         check(arn::core::provider_type_name(arn::core::ProviderType::none) == "none", "Name check");
 
         check(arn::core::provider_type_from_name("gemini") == arn::core::ProviderType::gemini, "From name check");
         check(arn::core::provider_type_from_name("deepseek") == arn::core::ProviderType::deepseek, "From name check");
+        check(arn::core::provider_type_from_name("openrouter") == arn::core::ProviderType::openrouter, "From name check");
         check(arn::core::provider_type_from_name("custom") == arn::core::ProviderType::custom, "From name check");
         check(arn::core::provider_type_from_name("unknown") == arn::core::ProviderType::none, "From name check");
 

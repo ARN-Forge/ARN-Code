@@ -45,4 +45,28 @@ void parse_deepseek_stream_chunk(std::string_view event,
                                  nlohmann::json& tool_calls,
                                  const TextStreamCallback& on_text);
 
+// OpenRouter payload & streaming helpers
+struct OpenRouterModelEntry {
+    std::string id;
+    std::string name;
+    std::string description;
+    ModelCapabilities capabilities;
+};
+
+std::string join_api_path(std::string_view prefix, std::string_view path);
+
+std::vector<OpenRouterModelEntry> parse_openrouter_model_catalog(std::string_view body);
+
+nlohmann::json serialize_openrouter_tools(const ToolRegistry& tools);
+
+nlohmann::json build_openrouter_payload(const std::string& model,
+                                        const nlohmann::json& messages,
+                                        const ToolRegistry& tools,
+                                        bool supports_tools = true);
+
+void parse_openrouter_stream_chunk(std::string_view event,
+                                   std::string& text_accumulator,
+                                   nlohmann::json& tool_calls,
+                                   const TextStreamCallback& on_text);
+
 } // namespace arn::core::detail

@@ -17,6 +17,7 @@ enum class ProviderType {
     none,
     deepseek,
     gemini,
+    openrouter,
     custom
 };
 
@@ -26,6 +27,8 @@ enum class ProviderType {
         return "DeepSeek";
     case ProviderType::gemini:
         return "Gemini";
+    case ProviderType::openrouter:
+        return "OpenRouter";
     case ProviderType::custom:
         return "Custom";
     case ProviderType::none:
@@ -39,6 +42,8 @@ enum class ProviderType {
         return ProviderType::gemini;
     if (name == "deepseek")
         return ProviderType::deepseek;
+    if (name == "openrouter" || name == "open-router" || name == "open_router")
+        return ProviderType::openrouter;
     if (name == "custom")
         return ProviderType::custom;
     return ProviderType::none;
@@ -79,6 +84,12 @@ struct ModelTurn {
     bool cancelled{false};
 };
 
+struct ModelCapabilities {
+    bool supports_tools{true};
+    bool supports_streaming{true};
+    bool supports_system_instruction{true};
+};
+
 class IModelProvider {
 public:
     virtual ~IModelProvider() = default;
@@ -87,6 +98,10 @@ public:
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
     [[nodiscard]] virtual std::string
     preferred_model(const std::vector<std::string>& models) const = 0;
+
+    [[nodiscard]] virtual ModelCapabilities model_capabilities(std::string_view /*model*/) const {
+        return ModelCapabilities{};
+    }
 
     [[nodiscard]] virtual ApiResult list_models(const std::string& api_key,
                                                 const std::atomic_bool* cancel_requested = nullptr) = 0;

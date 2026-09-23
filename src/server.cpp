@@ -47,7 +47,7 @@ struct Server {
             const auto secret = cmd.value("apiKey", "");
             if (next == Provider::none || secret.empty())
                 return {{"type", "error"},
-                        {"message", "Choose Gemini or DeepSeek and supply an API key."}};
+                        {"message", "Choose Gemini, DeepSeek, or OpenRouter and supply an API key."}};
             auto result = client.list_models(next, secret, &cancel);
             if (!result.ok)
                 return {{"type", "error"},

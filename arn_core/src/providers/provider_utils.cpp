@@ -168,4 +168,153 @@ void parse_deepseek_stream_chunk(std::string_view event,
     }
 }
 
+std::string join_api_path(std::string_view prefix, std::string_view path) {
+    if (prefix.empty()) return std::string(path);
+    if (path.empty()) return std::string(prefix);
+    if (prefix.ends_with('/') && path.starts_with('/')) {
+        return std::string(prefix.substr(0, prefix.size() - 1)) + std::string(path);
+    }
+    if (!prefix.ends_with('/') && !path.starts_with('/')) {
+        return std::string(prefix) + "/" + std::string(path);
+    }
+    return std::string(prefix) + std::string(path);
+}
+
+std::vector<OpenRouterModelEntry> parse_openrouter_model_catalog(std::string_view body) {
+    const auto document = nlohmann::json::parse(body);
+    std::vector<OpenRouterModelEntry> entries;
+    const auto data_it = document.find("data");
+    if (data_it == document.end() || !data_it->is_array())
+        return entries;
+
+    for (const auto& item : *data_it) {
+        if (!item.is_object())
+            continue;
+        const auto id_it = item.find("id");
+        if (id_it == item.end() || !id_it->is_string())
+            continue;
+        const auto id = id_it->get<std::string>();
+        if (id.empty())
+            continue;
+
+        if (item.contains("architecture") && item["architecture"].is_object()) {
+            const auto& arch = item["architecture"];
+            if (arch.contains("modality") && arch["modality"].is_string()) {
+                const auto modality = arch["modality"].get<std::string>();
+                if (modality.find("embeddings") != std::string::npos ||
+                    modality.find("image->image") != std::string::npos) {
+                    continue;
+                }
+            }
+        }
+
+        ModelCapabilities caps;
+        if (item.contains("supported_parameters") && item["supported_parameters"].is_array()) {
+            const auto& params = item["supported_parameters"];
+            if (!params.empty()) {
+                bool has_tools = false;
+                for (const auto& p : params) {
+                    if (p.is_string() && p.get<std::string>() == "tools") {
+                        has_tools = true;
+                        break;
+                    }
+                }
+                caps.supports_tools = has_tools;
+            }
+        }
+
+        std::string name = item.value("name", id);
+        std::string desc = item.value("description", "");
+
+        entries.push_back(OpenRouterModelEntry{
+            .id = id,
+            .name = std::move(name),
+            .description = std::move(desc),
+            .capabilities = caps
+        });
+    }
+
+    std::ranges::sort(entries, [](const auto& a, const auto& b) { return a.id < b.id; });
+    return entries;
+}
+
+nlohmann::json serialize_openrouter_tools(const ToolRegistry& tools) {
+    auto result = nlohmann::json::array();
+    for (const auto& definition : tools.definitions_json()) {
+        result.push_back({{"type", "function"}, {"function", definition}});
+    }
+    return result;
+}
+
+nlohmann::json build_openrouter_payload(const std::string& model,
+                                        const nlohmann::json& messages,
+                                        const ToolRegistry& tools,
+                                        bool supports_tools) {
+    nlohmann::json payload = {
+        {"model", model},
+        {"messages", messages},
+        {"stream", true}
+    };
+    if (supports_tools && !tools.empty()) {
+        payload["tools"] = serialize_openrouter_tools(tools);
+        payload["tool_choice"] = "auto";
+    }
+    return payload;
+}
+
+void parse_openrouter_stream_chunk(std::string_view event,
+                                   std::string& text_accumulator,
+                                   nlohmann::json& tool_calls,
+                                   const TextStreamCallback& on_text) {
+    if (event == "[DONE]")
+        return;
+    try {
+        const auto parsed = nlohmann::json::parse(event);
+        const auto packets = parsed.is_array() ? parsed : nlohmann::json::array({parsed});
+        for (const auto& packet : packets) {
+            if (packet.contains("error"))
+                continue;
+            const auto choices_it = packet.find("choices");
+            if (choices_it == packet.end() || !choices_it->is_array() || choices_it->empty())
+                continue;
+            const auto delta_it = (*choices_it)[0].find("delta");
+            if (delta_it == (*choices_it)[0].end() || !delta_it->is_object())
+                continue;
+            const auto& delta = *delta_it;
+            if (delta.contains("content") && !delta.at("content").is_null()) {
+                const auto chunk = delta.at("content").get<std::string>();
+                text_accumulator += chunk;
+                if (on_text)
+                    on_text(chunk);
+            }
+            for (const auto& change : delta.value("tool_calls", nlohmann::json::array())) {
+                const auto index = change.value("index", 0U);
+                while (tool_calls.size() <= index) {
+                    tool_calls.push_back(
+                        {{"id", ""},
+                         {"type", "function"},
+                         {"function", {{"name", ""}, {"arguments", ""}}}});
+                }
+                auto& call = tool_calls.at(index);
+                if (change.contains("id"))
+                    call["id"] = change.at("id");
+                if (change.contains("type"))
+                    call["type"] = change.at("type");
+                if (change.contains("function")) {
+                    const auto& function = change.at("function");
+                    if (function.contains("name"))
+                        call["function"]["name"] = function.at("name");
+                    if (function.contains("arguments")) {
+                        call["function"]["arguments"] =
+                            call["function"]["arguments"].get<std::string>() +
+                            function.at("arguments").get<std::string>();
+                    }
+                }
+            }
+        }
+    } catch (const std::exception&) {
+        // Ignore malformed transient SSE data
+    }
+}
+
 } // namespace arn::core::detail

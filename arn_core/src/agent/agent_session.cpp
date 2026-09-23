@@ -201,6 +201,11 @@ std::string AgentSession::active_model() const {
     return impl_->active_model;
 }
 
+ModelCapabilities AgentSession::model_capabilities() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->provider ? impl_->provider->model_capabilities(impl_->active_model) : ModelCapabilities{};
+}
+
 ApiResult AgentSession::prompt(std::string_view text,
                                const StreamCallbacks& callbacks,
                                const std::atomic_bool* cancel) {

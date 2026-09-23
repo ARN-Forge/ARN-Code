@@ -325,16 +325,18 @@ int run() {
         const auto argument = separator == std::string::npos ? "" : trim(input.substr(separator + 1));
         if (command == "/exit" || command == "/quit") return 0;
         if (command == "/clear") ui.clear();
-        else if (command == "/help") ui.add(Tone::muted, "Commands: /key-gemini <key>, /key-deepseek <key>, /model <name>, /models, /provider <name>, /status, /clear-session, /clear, /exit");
+        else if (command == "/help") ui.add(Tone::muted, "Commands: /key-gemini <key>, /key-deepseek <key>, /key-openrouter <key>, /model <name>, /models, /provider <name>, /status, /clear-session, /clear, /exit");
         else if (command == "/status") ui.add(Tone::normal, "Provider: " + arn::provider_name(provider) + " | Model: " + (model.empty() ? "not selected" : model) + " | API key: " + (key.empty() ? "not set" : "set") + " | Context: " + (client.session_entries() ? "active" : "empty"));
         else if (command == "/clear-session") { client.reset_session(); ui.add(Tone::good, "Chat context cleared. Key and model are unchanged."); }
         else if (command == "/models") { if (models.empty()) ui.add(Tone::warning, "No verified API key is active."); else for (const auto& name : models) ui.add(Tone::normal, "• " + name); }
         else if (command == "/provider") {
             const auto selected = arn::provider_from_name(lower_ascii(argument));
-            if (selected == arn::Provider::none) ui.add(Tone::warning, "Supported providers: gemini, deepseek");
+            if (selected == arn::Provider::none) ui.add(Tone::warning, "Supported providers: gemini, deepseek, openrouter");
             else { provider = selected; key.clear(); model.clear(); models.clear(); client.reset_session(); ui.add(Tone::good, "Active provider: " + arn::provider_name(provider)); }
-        } else if (command == "/key-gemini" || command == "/key-deepseek") {
-            const auto selected = command == "/key-gemini" ? arn::Provider::gemini : arn::Provider::deepseek;
+        } else if (command == "/key-gemini" || command == "/key-deepseek" || command == "/key-openrouter") {
+            const auto selected = command == "/key-gemini" ? arn::Provider::gemini
+                                : (command == "/key-deepseek" ? arn::Provider::deepseek
+                                                             : arn::Provider::openrouter);
             ui.status("Verifying API key…"); refresh();
             const auto result = client.list_models(selected, remove_quotes(argument));
             if (!result.ok || result.models.empty()) ui.add(Tone::error, "Key was not saved: " + (result.ok ? "no text-generation models are available." : result.message));
