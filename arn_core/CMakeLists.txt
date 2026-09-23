@@ -7,6 +7,10 @@ add_library(arn_core
     src/net/http_client.cpp
     src/net/model_parser.cpp
     src/tool/tool_registry.cpp
+    src/providers/provider_utils.cpp
+    src/providers/gemini_provider.cpp
+    src/providers/deepseek_provider.cpp
+    src/providers/provider_factory.cpp
 )
 
 add_library(arn::core ALIAS arn_core)
@@ -15,6 +19,8 @@ target_include_directories(arn_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        src
 )
 
 target_compile_features(arn_core PUBLIC cxx_std_23)
@@ -43,9 +49,15 @@ if (BUILD_TESTING)
     target_link_libraries(arn_core_tool_registry_test PRIVATE arn::core)
     add_test(NAME arn_core_tool_registry COMMAND arn_core_tool_registry_test)
 
+    add_executable(arn_core_provider_test tests/provider_test.cpp)
+    target_include_directories(arn_core_provider_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(arn_core_provider_test PRIVATE arn::core)
+    add_test(NAME arn_core_provider COMMAND arn_core_provider_test)
+
     if (MSVC)
         target_compile_options(arn_core_sse_test PRIVATE /utf-8)
         target_compile_options(arn_core_retry_test PRIVATE /utf-8)
         target_compile_options(arn_core_tool_registry_test PRIVATE /utf-8)
+        target_compile_options(arn_core_provider_test PRIVATE /utf-8)
     endif()
 endif()

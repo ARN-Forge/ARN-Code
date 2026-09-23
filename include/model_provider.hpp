@@ -8,24 +8,17 @@
 #include <vector>
 
 #include "tool_executor.hpp"
+#include <arn/core/provider/model_provider.hpp>
 
 namespace arn {
 
-enum class Provider { none, deepseek, gemini };
+using Provider = ::arn::core::ProviderType;
+using ApiResult = ::arn::core::ApiResult;
+using ProviderStreamCallback = ::arn::core::TextStreamCallback;
 
-struct ApiResult {
-    bool ok{};
-    std::string message;
-    std::vector<std::string> models;
-    bool cancelled{};
-};
-
-using ProviderStreamCallback = std::function<void(std::string_view text)>;
-
-// Common boundary used by the rest of ARN. Implementations own all provider-specific
-// authentication, HTTP formats, model discovery, streaming and conversation state.
+// Common boundary used by ARN application code. Implementations adapt arn::core::IModelProvider.
 class ModelProvider {
-  public:
+public:
     virtual ~ModelProvider() = default;
 
     [[nodiscard]] virtual Provider kind() const noexcept = 0;
@@ -47,24 +40,13 @@ class ModelProvider {
 };
 
 [[nodiscard]] std::unique_ptr<ModelProvider> make_provider(Provider provider);
+
 [[nodiscard]] inline Provider provider_from_name(std::string_view name) {
-    if (name == "gemini")
-        return Provider::gemini;
-    if (name == "deepseek")
-        return Provider::deepseek;
-    return Provider::none;
+    return ::arn::core::provider_type_from_name(name);
 }
 
 [[nodiscard]] inline std::string provider_name(Provider provider) {
-    switch (provider) {
-    case Provider::deepseek:
-        return "DeepSeek";
-    case Provider::gemini:
-        return "Gemini";
-    case Provider::none:
-        return "none";
-    }
-    return "unknown";
+    return std::string(::arn::core::provider_type_name(provider));
 }
 
 } // namespace arn
