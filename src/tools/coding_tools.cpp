@@ -1,107 +1,15 @@
-#include "tool_executor.hpp"
+#include "tools/coding_tools.hpp"
+#include "tools/workspace_sandbox.hpp"
 
-#include <algorithm>
-#include <cctype>
 #include <fstream>
-#include <sstream>
 #include <system_error>
+#include <utility>
 
 namespace arn {
 namespace {
 
-constexpr std::size_t max_file_bytes = 256 * 1024;
-constexpr std::size_t max_listed_entries = 300;
-
 ::arn::core::ToolResult failure(std::string message) {
     return ::arn::core::ToolResult::failure(std::move(message));
-}
-
-bool is_within(const std::filesystem::path& root, const std::filesystem::path& candidate) {
-    if (candidate == root)
-        return true;
-    const auto relative = candidate.lexically_relative(root);
-    // std::filesystem::path::starts_with is not implemented by every MSVC
-    // standard-library version yet. Checking the first path component gives us
-    // the same traversal protection without depending on that newer API.
-    return !relative.empty() && !relative.is_absolute() && *relative.begin() != "..";
-}
-
-bool contains_protected_component(const std::filesystem::path& path) {
-    for (const auto& component : path) {
-        auto name = component.string();
-        std::transform(name.begin(), name.end(), name.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        while (!name.empty() && (name.back() == '.' || name.back() == ' '))
-            name.pop_back();
-        if (name == ".git" || name == ".ssh" || name == ".aws" || name == ".codex" ||
-            name == ".agents" || name == ".env" || name.starts_with(".env.") ||
-            name == "credentials" || name == "credentials.json" || name == "id_rsa" ||
-            name == "id_ed25519" || name.ends_with(".pem") || name.ends_with(".key") ||
-            name.find(':') != std::string::npos)
-            return true;
-    }
-    return false;
-}
-
-std::filesystem::path safe_path(const std::filesystem::path& root, const std::string& path_str,
-                                bool /*allow_missing_leaf*/, std::string& error) {
-    if (path_str.empty()) {
-        error = "A path is required.";
-        return {};
-    }
-    std::filesystem::path requested(path_str);
-    std::error_code ec;
-    const auto root_real = std::filesystem::weakly_canonical(root, ec);
-    if (ec) {
-        error = "Could not resolve the project root.";
-        return {};
-    }
-
-    // Determine target path (support relative paths and project-contained absolute paths)
-    std::filesystem::path target;
-    if (requested.is_absolute()) {
-        target = requested;
-    } else {
-        target = root_real / requested;
-    }
-
-    if (contains_protected_component(target.lexically_relative(root_real))) {
-        error = "Protected file or directory.";
-        return {};
-    }
-    // Resolve the entire target, including an existing leaf symlink.
-    const auto resolved = std::filesystem::weakly_canonical(target, ec);
-
-    if (ec || !is_within(root_real, resolved)) {
-        error = "The requested path escapes the project folder.";
-        return {};
-    }
-
-    // Check protected components on the relative path inside project
-    const auto relative = resolved.lexically_relative(root_real);
-    if (contains_protected_component(relative)) {
-        error = "This path is inside a protected folder or file (.git, .env).";
-        return {};
-    }
-
-    return resolved;
-}
-
-std::string read_text(const std::filesystem::path& path, std::string& error) {
-    std::error_code ec;
-    const auto size = std::filesystem::file_size(path, ec);
-    if (ec || size > max_file_bytes) {
-        error = "The file is unavailable or larger than 256 KiB.";
-        return {};
-    }
-    std::ifstream stream(path, std::ios::binary);
-    if (!stream) {
-        error = "Could not open the file.";
-        return {};
-    }
-    std::ostringstream contents;
-    contents << stream.rdbuf();
-    return contents.str();
 }
 
 ::arn::core::ToolResult execute_modifying_tool(
@@ -345,19 +253,34 @@ const ::arn::core::ToolDefinition& DeleteFileTool::definition() const noexcept {
     return execute_modifying_tool("delete_file", project_root_, on_change_, arguments, context);
 }
 
-// ToolExecutor
+void register_coding_tools(::arn::core::ToolRegistry& registry,
+                           const std::filesystem::path& project_root,
+                           std::function<void()> on_change) {
+    registry.register_tool(std::make_shared<ListFilesTool>(project_root));
+    registry.register_tool(std::make_shared<ReadFileTool>(project_root));
+    registry.register_tool(std::make_shared<WriteFileTool>(project_root, on_change));
+    registry.register_tool(std::make_shared<ReplaceTextTool>(project_root, on_change));
+    registry.register_tool(std::make_shared<DeleteFileTool>(project_root, std::move(on_change)));
+}
+
+std::shared_ptr<::arn::core::ToolRegistry>
+create_coding_tool_registry(const std::filesystem::path& project_root,
+                            std::function<void()> on_change) {
+    auto registry = std::make_shared<::arn::core::ToolRegistry>();
+    register_coding_tools(*registry, project_root, std::move(on_change));
+    return registry;
+}
+
+// ToolExecutor implementation
 ToolExecutor::ToolExecutor(std::filesystem::path project_root, std::function<void()> on_change)
-    : on_change_(std::move(on_change)) {
+    : on_change_(std::move(on_change)),
+      registry_(std::make_shared<::arn::core::ToolRegistry>()) {
     std::error_code ec;
     project_root_ = std::filesystem::weakly_canonical(std::move(project_root), ec);
     if (ec)
         project_root_ = std::filesystem::current_path();
 
-    registry_.register_tool(std::make_shared<ListFilesTool>(project_root_));
-    registry_.register_tool(std::make_shared<ReadFileTool>(project_root_));
-    registry_.register_tool(std::make_shared<WriteFileTool>(project_root_, on_change_));
-    registry_.register_tool(std::make_shared<ReplaceTextTool>(project_root_, on_change_));
-    registry_.register_tool(std::make_shared<DeleteFileTool>(project_root_, on_change_));
+    register_coding_tools(*registry_, project_root_, on_change_);
 }
 
 const std::filesystem::path& ToolExecutor::project_root() const noexcept {
@@ -365,6 +288,10 @@ const std::filesystem::path& ToolExecutor::project_root() const noexcept {
 }
 
 const ::arn::core::ToolRegistry& ToolExecutor::registry() const noexcept {
+    return *registry_;
+}
+
+std::shared_ptr<const ::arn::core::ToolRegistry> ToolExecutor::registry_ptr() const noexcept {
     return registry_;
 }
 
@@ -374,7 +301,7 @@ ToolExecution ToolExecutor::execute(const std::string& name, const nlohmann::jso
         .cancel_requested = nullptr,
         .confirm = confirm
     };
-    return registry_.execute(name, arguments, context);
+    return registry_->execute(name, arguments, context);
 }
 
 } // namespace arn
