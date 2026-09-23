@@ -1,6 +1,10 @@
 #include "api_client.hpp"
 #include "model_list.hpp"
 
+#include <arn/core/net/http_client.hpp>
+#include <arn/core/net/model_parser.hpp>
+#include <arn/core/net/sse_decoder.hpp>
+
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
@@ -114,180 +118,12 @@ void trim_history(json& history, std::size_t keep_from) {
     }
 }
 
-bool should_retry(const httplib::Result& response) {
-    if (!response)
-        return true;
-    const int status = response->status;
-    return status == 429 || status == 500 || status == 502 || status == 503 || status == 504;
-}
-
-std::chrono::milliseconds retry_delay(const httplib::Result& response, int attempt) {
-    if (response && response->has_header("Retry-After")) {
-        try {
-            const auto seconds = std::stoi(response->get_header_value("Retry-After"));
-            if (seconds >= 0 && seconds <= 60)
-                return std::chrono::seconds(seconds);
-        } catch (const std::exception&) {
-            // A date-form Retry-After header is uncommon for these APIs; use
-            // exponential backoff when it cannot be parsed as seconds.
-        }
-    }
-
-    const int base_ms = 500 * (1 << attempt);
-    std::uniform_int_distribution<int> jitter(0, 250);
-    static thread_local std::mt19937 generator(std::random_device{}());
-    return std::chrono::milliseconds(base_ms + jitter(generator));
-}
-
-template <typename RequestFn>
-auto execute_with_retry(RequestFn&& request, const std::atomic_bool* cancel_requested = nullptr) {
-    for (int attempt = 0;; ++attempt) {
-        auto response = request();
-        if ((cancel_requested && cancel_requested->load()) || !should_retry(response) ||
-            attempt + 1 >= max_request_attempts)
-            return response;
-        const auto deadline = std::chrono::steady_clock::now() + retry_delay(response, attempt);
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (cancel_requested && cancel_requested->load())
-                return response;
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-    }
-}
-
-template <typename RequestFn>
-auto execute_stream_with_retry(RequestFn&& request, const bool& received_event,
-                               const std::atomic_bool* cancel_requested,
-                               const ApiClient::StreamCallback& on_progress) {
-    for (int attempt = 0;; ++attempt) {
-        if (on_progress)
-            on_progress("Waiting for provider response (attempt " + std::to_string(attempt + 1) +
-                        ")");
-        auto response = request();
-        // Never replay a partially printed answer: retrying then would show
-        // duplicated text to the person using ARN.
-        if ((cancel_requested && cancel_requested->load(std::memory_order_relaxed)) ||
-            received_event || !should_retry(response) || attempt + 1 >= max_request_attempts ||
-            (!response && response.error() == httplib::Error::Read))
-            return response;
-        // A full idle read timeout already waited 90 seconds. Do not silently repeat it.
-        if (on_progress)
-            on_progress("Provider unavailable or rate-limited; waiting before retry");
-        const auto deadline = std::chrono::steady_clock::now() + retry_delay(response, attempt);
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (cancel_requested && cancel_requested->load())
-                return response;
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-    }
-}
-
-class SseDecoder {
-  public:
-    template <typename EventFn> void push(std::string_view bytes, EventFn&& on_event) {
-        // Accept both SSE line endings. JSON carriage returns are escaped, so
-        // stripping transport-level '\r' here cannot alter event data.
-        for (const char byte : bytes) {
-            if (byte != '\r')
-                pending_.push_back(byte);
-        }
-        for (;;) {
-            const auto end = pending_.find("\n\n");
-            if (end == std::string::npos)
-                break;
-            std::string event = pending_.substr(0, end);
-            pending_.erase(0, end + 2);
-
-            std::string data;
-            std::size_t start = 0;
-            while (start <= event.size()) {
-                const auto line_end = event.find('\n', start);
-                std::string_view line(event.data() + start,
-                                      (line_end == std::string::npos ? event.size() : line_end) -
-                                          start);
-                if (!line.empty() && line.back() == '\r')
-                    line.remove_suffix(1);
-                if (line.starts_with("data:")) {
-                    line.remove_prefix(5);
-                    if (!line.empty() && line.front() == ' ')
-                        line.remove_prefix(1);
-                    if (!data.empty())
-                        data.push_back('\n');
-                    data.append(line);
-                }
-                if (line_end == std::string::npos)
-                    break;
-                start = line_end + 1;
-            }
-            if (!data.empty())
-                on_event(data);
-        }
-    }
-
-    template <typename EventFn> void finish(EventFn&& on_event) {
-        if (pending_.empty())
-            return;
-
-        // Some HTTP servers omit the final blank SSE line. Treat the tail as
-        // one final event instead of silently dropping the model response.
-        if (pending_.starts_with("data:")) {
-            push("\n\n", std::forward<EventFn>(on_event));
-            return;
-        }
-        std::string tail = std::move(pending_);
-        pending_.clear();
-        on_event(tail);
-    }
-
-  private:
-    std::string pending_;
-};
-
-httplib::Result stream_post(httplib::Client& client, const std::string& path,
-                            const httplib::Headers& headers, const std::string& body,
-                            const std::function<void(std::string_view)>& on_event,
-                            std::string& error_body, bool& received_event,
-                            const std::atomic_bool* cancel_requested) {
-    httplib::Request request;
-    request.method = "POST";
-    request.path = path;
-    request.headers = headers;
-    request.headers.emplace("Accept", "text/event-stream");
-    request.headers.emplace("Content-Type", "application/json");
-    request.body = body;
-
-    int status = 0;
-    SseDecoder decoder;
-    request.response_handler = [&status](const httplib::Response& response) {
-        status = response.status;
-        return true;
-    };
-    request.progress = [cancel_requested](std::uint64_t, std::uint64_t) {
-        return !cancel_requested || !cancel_requested->load(std::memory_order_relaxed);
-    };
-    request.content_receiver = [&](const char* data, std::size_t size, std::uint64_t,
-                                   std::uint64_t) {
-        if (cancel_requested && cancel_requested->load(std::memory_order_relaxed))
-            return false;
-        if (status < 200 || status >= 300) {
-            error_body.append(data, size);
-            return true;
-        }
-        decoder.push(std::string_view(data, size), [&](std::string_view event) {
-            received_event = true;
-            on_event(event);
-        });
-        return true;
-    };
-    auto response = client.send(request);
-    if (response && response->status >= 200 && response->status < 300) {
-        decoder.finish([&](std::string_view event) {
-            received_event = true;
-            on_event(event);
-        });
-    }
-    return response;
-}
+using arn::core::net::should_retry;
+using arn::core::net::retry_delay;
+using arn::core::net::execute_with_retry;
+using arn::core::net::execute_stream_with_retry;
+using arn::core::net::SseDecoder;
+using arn::core::net::stream_post;
 
 ApiResult deepseek_models(const std::string& api_key, httplib::Client& client,
                           const std::atomic_bool* cancel_requested) {

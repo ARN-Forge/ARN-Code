@@ -29,6 +29,8 @@ FetchContent_MakeAvailable(nlohmann_json cpp_httplib)
 
 find_package(Threads REQUIRED)
 
+include(CTest)
+
 add_subdirectory(arn_core)
 
 if (WIN32)
@@ -53,16 +55,15 @@ if (MSVC)
     target_compile_options(arn PRIVATE /utf-8)
 endif()
 
-include(CTest)
 if (BUILD_TESTING)
     add_executable(model_list_test tests/model_list_test.cpp)
     target_include_directories(model_list_test PRIVATE include)
-    target_link_libraries(model_list_test PRIVATE nlohmann_json::nlohmann_json)
+    target_link_libraries(model_list_test PRIVATE arn::core nlohmann_json::nlohmann_json)
     add_test(NAME model_list COMMAND model_list_test)
     add_executable(model_provider_test tests/model_provider_test.cpp src/api_client.cpp
                                        src/tool_executor.cpp)
     target_include_directories(model_provider_test PRIVATE include)
-    target_link_libraries(model_provider_test PRIVATE nlohmann_json::nlohmann_json
+    target_link_libraries(model_provider_test PRIVATE arn::core nlohmann_json::nlohmann_json
                                                       httplib::httplib Threads::Threads)
     add_test(NAME model_provider COMMAND model_provider_test)
     if (MSVC)
