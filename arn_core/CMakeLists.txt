@@ -6,6 +6,7 @@ add_library(arn_core
     src/version.cpp
     src/net/http_client.cpp
     src/net/model_parser.cpp
+    src/tool/tool_registry.cpp
 )
 
 add_library(arn::core ALIAS arn_core)
@@ -38,8 +39,13 @@ if (BUILD_TESTING)
     target_link_libraries(arn_core_retry_test PRIVATE arn::core)
     add_test(NAME arn_core_retry COMMAND arn_core_retry_test)
 
+    add_executable(arn_core_tool_registry_test tests/tool_registry_test.cpp)
+    target_link_libraries(arn_core_tool_registry_test PRIVATE arn::core)
+    add_test(NAME arn_core_tool_registry COMMAND arn_core_tool_registry_test)
+
     if (MSVC)
         target_compile_options(arn_core_sse_test PRIVATE /utf-8)
         target_compile_options(arn_core_retry_test PRIVATE /utf-8)
+        target_compile_options(arn_core_tool_registry_test PRIVATE /utf-8)
     endif()
 endif()

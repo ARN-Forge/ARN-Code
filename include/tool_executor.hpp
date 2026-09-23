@@ -2,27 +2,85 @@
 
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
 
 #include <nlohmann/json.hpp>
+#include "arn/core/confirmation/confirmation_request.hpp"
+#include "arn/core/tool/tool.hpp"
+#include "arn/core/tool/tool_registry.hpp"
 
 namespace arn {
 
-struct ToolRequest {
-    std::string name;
-    nlohmann::json arguments;
-    std::string summary;
-    bool changes_files{};
+using ToolRequest = ::arn::core::ConfirmationRequest;
+using ToolExecution = ::arn::core::ToolResult;
+
+class ListFilesTool final : public ::arn::core::ITool {
+public:
+    explicit ListFilesTool(std::filesystem::path project_root);
+    [[nodiscard]] const ::arn::core::ToolDefinition& definition() const noexcept override;
+    [[nodiscard]] bool requires_confirmation() const noexcept override { return false; }
+    [[nodiscard]] ::arn::core::ToolResult execute(const nlohmann::json& arguments,
+                                                  const ::arn::core::ToolContext& context) override;
+
+private:
+    std::filesystem::path project_root_;
 };
 
-struct ToolExecution {
-    bool ok{};
-    nlohmann::json result;
+class ReadFileTool final : public ::arn::core::ITool {
+public:
+    explicit ReadFileTool(std::filesystem::path project_root);
+    [[nodiscard]] const ::arn::core::ToolDefinition& definition() const noexcept override;
+    [[nodiscard]] bool requires_confirmation() const noexcept override { return false; }
+    [[nodiscard]] ::arn::core::ToolResult execute(const nlohmann::json& arguments,
+                                                  const ::arn::core::ToolContext& context) override;
+
+private:
+    std::filesystem::path project_root_;
+};
+
+class WriteFileTool final : public ::arn::core::ITool {
+public:
+    explicit WriteFileTool(std::filesystem::path project_root, std::function<void()> on_change = {});
+    [[nodiscard]] const ::arn::core::ToolDefinition& definition() const noexcept override;
+    [[nodiscard]] bool requires_confirmation() const noexcept override { return true; }
+    [[nodiscard]] ::arn::core::ToolResult execute(const nlohmann::json& arguments,
+                                                  const ::arn::core::ToolContext& context) override;
+
+private:
+    std::filesystem::path project_root_;
+    std::function<void()> on_change_;
+};
+
+class ReplaceTextTool final : public ::arn::core::ITool {
+public:
+    explicit ReplaceTextTool(std::filesystem::path project_root, std::function<void()> on_change = {});
+    [[nodiscard]] const ::arn::core::ToolDefinition& definition() const noexcept override;
+    [[nodiscard]] bool requires_confirmation() const noexcept override { return true; }
+    [[nodiscard]] ::arn::core::ToolResult execute(const nlohmann::json& arguments,
+                                                  const ::arn::core::ToolContext& context) override;
+
+private:
+    std::filesystem::path project_root_;
+    std::function<void()> on_change_;
+};
+
+class DeleteFileTool final : public ::arn::core::ITool {
+public:
+    explicit DeleteFileTool(std::filesystem::path project_root, std::function<void()> on_change = {});
+    [[nodiscard]] const ::arn::core::ToolDefinition& definition() const noexcept override;
+    [[nodiscard]] bool requires_confirmation() const noexcept override { return true; }
+    [[nodiscard]] ::arn::core::ToolResult execute(const nlohmann::json& arguments,
+                                                  const ::arn::core::ToolContext& context) override;
+
+private:
+    std::filesystem::path project_root_;
+    std::function<void()> on_change_;
 };
 
 class ToolExecutor {
-  public:
-    using ConfirmationFn = std::function<bool(const ToolRequest&)>;
+public:
+    using ConfirmationFn = ::arn::core::ConfirmationFn;
 
     // The project root is the folder in which `arn` was launched.
     explicit ToolExecutor(std::filesystem::path project_root = std::filesystem::current_path(),
@@ -31,10 +89,12 @@ class ToolExecutor {
     [[nodiscard]] ToolExecution execute(const std::string& name, const nlohmann::json& arguments,
                                         const ConfirmationFn& confirm) const;
     [[nodiscard]] const std::filesystem::path& project_root() const noexcept;
+    [[nodiscard]] const ::arn::core::ToolRegistry& registry() const noexcept;
 
-  private:
+private:
     std::filesystem::path project_root_;
     std::function<void()> on_change_;
+    ::arn::core::ToolRegistry registry_;
 };
 
 } // namespace arn
