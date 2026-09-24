@@ -1,4 +1,4 @@
-# ARN IDE v0.5.0
+# ARN IDE v0.6.0
 
 ARN's desktop editor uses Tauri 2, React and Monaco. Its AI providers, model
 catalogue, conversation and file tools run in the C++ ARN engine through
@@ -56,7 +56,7 @@ npm run installer:build
 npm run installer:test
 ```
 
-Output: `src-tauri/target/release/bundle/nsis/ARN IDE_0.5.0_x64-setup.exe`.
+Output: `src-tauri/target/release/bundle/nsis/ARN IDE_0.6.0_x64-setup.exe`.
 `ARN_BIN` can select the C++ executable; `ARN_RUNTIME_DIR` can supply DLL search
 directories separated by semicolons. The packager follows x64 PE imports and
 includes the matching OpenSSL and MSVC redistributable DLLs. It fails if a
