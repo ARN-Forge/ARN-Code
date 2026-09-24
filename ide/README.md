@@ -7,7 +7,7 @@ catalogue, conversation and file tools run in the C++ ARN engine through
 ## Windows download
 
 Extract **arn-ide-windows-x64.zip** from the
-[GitHub release](https://github.com/arnecto/arn/releases/tag/v0.5.0) and run
+[GitHub release](https://github.com/ARN-Forge/ARN-Code/releases/tag/v0.5.0) and run
 `arn-ide.exe`. Keep `arn.exe` and the OpenSSL DLLs beside it. Windows WebView2
 Runtime is required. This is an unsigned portable archive.
 

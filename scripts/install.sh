@@ -2,7 +2,7 @@
 
 set -eu
 
-repository="${ARN_REPOSITORY:-arnecto/arn}"
+repository="${ARN_REPOSITORY:-ARN-Forge/ARN-Code}"
 install_dir="${ARN_INSTALL_DIR:-${HOME}/.local/bin}"
 system="$(uname -s)"
 machine="$(uname -m)"

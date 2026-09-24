@@ -11,7 +11,7 @@ std::unique_ptr<::arn::core::IModelProvider> make_provider(Provider provider) {
     if (provider == Provider::openrouter) {
         if (auto* or_prov = dynamic_cast<::arn::core::OpenRouterProvider*>(core_provider.get())) {
             auto config = or_prov->config();
-            config.http_referer = "https://github.com/arn-org/arn";
+            config.http_referer = "https://github.com/ARN-Forge/ARN-Code";
             config.app_title = "ARN";
             or_prov->set_config(std::move(config));
         }
