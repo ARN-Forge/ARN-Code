@@ -1,7 +1,9 @@
-#include "api_client.hpp"
-#include "terminal.hpp"
-#include "tool_executor.hpp"
+#include "agent/coding_prompt.hpp"
+#include "model_provider.hpp"
 #include "server.hpp"
+#include "terminal.hpp"
+#include "tools/coding_tools.hpp"
+#include <arn/core/agent/agent_session.hpp>
 
 #include <algorithm>
 #include <array>
@@ -290,12 +292,14 @@ std::string read_line(Ui& ui, arn::TerminalSession& terminal) {
 int run() {
     arn::TerminalSession terminal;
     Ui ui(terminal);
-    arn::ApiClient client;
+    arn::core::AgentSession session;
+    session.set_system_instruction(arn::coding_prompt());
     const arn::ToolExecutor tools;
+    session.set_tools(tools.registry_ptr());
     arn::Provider provider = arn::Provider::none;
     std::string key, model;
     std::vector<std::string> models;
-    const auto refresh = [&] { ui.session(provider, model, client.session_entries() != 0); ui.render(); };
+    const auto refresh = [&] { ui.session(provider, model, session.session_entries() != 0); ui.render(); };
     refresh();
     for (;;) {
         const auto input = normalize_command(trim(read_line(ui, terminal)));
@@ -304,8 +308,8 @@ int run() {
         if (input.front() != '/') {
             ui.add(Tone::normal, {}); ui.status("Arnie is working… Esc or Ctrl+C cancels"); refresh();
             std::atomic_bool cancelled = false;
-            arn::TerminalCancellationMonitor watcher(cancelled, [&client] { client.cancel_active_request(); });
-            const auto confirm = [&](const arn::ToolRequest& request) {
+            arn::TerminalCancellationMonitor watcher(cancelled, [&session] { session.cancel_active_request(); });
+            const auto confirm = [&](const arn::core::ConfirmationRequest& request) {
                 watcher.pause_input();
                 ui.status("Allow file change? " + request.summary + " [y/N]");
                 refresh();
@@ -314,7 +318,13 @@ int run() {
                 watcher.resume_input();
                 return answer == 'y' || answer == 'Y';
             };
-            const auto result = client.submit_prompt(provider, key, model, input, tools, confirm, [&](std::string_view text) { ui.append(text); refresh(); }, &cancelled);
+            session.set_confirmation_handler(confirm);
+            const auto result = session.prompt(
+                input,
+                arn::core::StreamCallbacks{
+                    .on_text = [&](std::string_view text) { ui.append(text); refresh(); }
+                },
+                &cancelled);
             if (result.cancelled) ui.add(Tone::warning, "Request cancelled.");
             else if (!result.ok) ui.add(Tone::error, "Error: " + result.message);
             else if (result.message.empty()) ui.add(Tone::muted, "Done.");
@@ -325,24 +335,40 @@ int run() {
         const auto argument = separator == std::string::npos ? "" : trim(input.substr(separator + 1));
         if (command == "/exit" || command == "/quit") return 0;
         if (command == "/clear") ui.clear();
-        else if (command == "/help") ui.add(Tone::muted, "Commands: /key-gemini <key>, /key-deepseek <key>, /model <name>, /models, /provider <name>, /status, /clear-session, /clear, /exit");
-        else if (command == "/status") ui.add(Tone::normal, "Provider: " + arn::provider_name(provider) + " | Model: " + (model.empty() ? "not selected" : model) + " | API key: " + (key.empty() ? "not set" : "set") + " | Context: " + (client.session_entries() ? "active" : "empty"));
-        else if (command == "/clear-session") { client.reset_session(); ui.add(Tone::good, "Chat context cleared. Key and model are unchanged."); }
+        else if (command == "/help") ui.add(Tone::muted, "Commands: /key-gemini <key>, /key-deepseek <key>, /key-openrouter <key>, /model <name>, /models, /provider <name>, /status, /clear-session, /clear, /exit");
+        else if (command == "/status") ui.add(Tone::normal, "Provider: " + arn::provider_name(provider) + " | Model: " + (model.empty() ? "not selected" : model) + " | API key: " + (key.empty() ? "not set" : "set") + " | Context: " + (session.session_entries() ? "active" : "empty"));
+        else if (command == "/clear-session") { session.reset_session(); ui.add(Tone::good, "Chat context cleared. Key and model are unchanged."); }
         else if (command == "/models") { if (models.empty()) ui.add(Tone::warning, "No verified API key is active."); else for (const auto& name : models) ui.add(Tone::normal, "• " + name); }
         else if (command == "/provider") {
             const auto selected = arn::provider_from_name(lower_ascii(argument));
-            if (selected == arn::Provider::none) ui.add(Tone::warning, "Supported providers: gemini, deepseek");
-            else { provider = selected; key.clear(); model.clear(); models.clear(); client.reset_session(); ui.add(Tone::good, "Active provider: " + arn::provider_name(provider)); }
-        } else if (command == "/key-gemini" || command == "/key-deepseek") {
-            const auto selected = command == "/key-gemini" ? arn::Provider::gemini : arn::Provider::deepseek;
+            if (selected == arn::Provider::none) ui.add(Tone::warning, "Supported providers: gemini, deepseek, openrouter");
+            else { provider = selected; key.clear(); model.clear(); models.clear(); session.reset_session(); ui.add(Tone::good, "Active provider: " + arn::provider_name(provider)); }
+        } else if (command == "/key-gemini" || command == "/key-deepseek" || command == "/key-openrouter") {
+            const auto selected = command == "/key-gemini" ? arn::Provider::gemini
+                                : (command == "/key-deepseek" ? arn::Provider::deepseek
+                                                             : arn::Provider::openrouter);
             ui.status("Verifying API key…"); refresh();
-            const auto result = client.list_models(selected, remove_quotes(argument));
-            if (!result.ok || result.models.empty()) ui.add(Tone::error, "Key was not saved: " + (result.ok ? "no text-generation models are available." : result.message));
-            else { provider = selected; key = remove_quotes(argument); models = result.models; model = client.preferred_model(provider, models); client.reset_session(); ui.add(Tone::good, "Connected to " + arn::provider_name(provider) + ". Default model: " + model); }
+            auto prov = arn::make_provider(selected);
+            if (!prov) {
+                ui.add(Tone::error, "Provider not available.");
+            } else {
+                const auto result = session.configure_provider(std::move(prov), remove_quotes(argument));
+                if (!result.ok || session.available_models().empty()) {
+                    ui.add(Tone::error, "Key was not saved: " + (result.ok ? "no text-generation models are available." : result.message));
+                } else {
+                    provider = selected;
+                    key = remove_quotes(argument);
+                    models = session.available_models();
+                    model = session.preferred_model();
+                    session.select_model(model);
+                    session.reset_session();
+                    ui.add(Tone::good, "Connected to " + arn::provider_name(provider) + ". Default model: " + model);
+                }
+            }
         } else if (command == "/model") {
             const auto selected = remove_quotes(argument);
             if (std::ranges::find(models, selected) == models.end()) ui.add(Tone::warning, "That model is not in the active provider list. Use /models.");
-            else { model = selected; client.reset_session(); ui.add(Tone::good, "Active model: " + model); }
+            else { model = selected; session.select_model(model); session.reset_session(); ui.add(Tone::good, "Active model: " + model); }
         } else ui.add(Tone::error, "Unknown command. Type /help for commands.");
         ui.status("Type /help for commands · F2 copy mode"); refresh();
     }

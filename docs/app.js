@@ -21,9 +21,9 @@ document.querySelectorAll('[data-scenario]').forEach(b => b.addEventListener('cl
 el('approve').addEventListener('click', () => {el('approval').hidden = true; el('result').textContent = scenarios[current].done; el('replay').focus();});
 el('decline').addEventListener('click', () => {el('approval').hidden = true; el('result').textContent = 'Change declined. Your files stay as they are.'; el('replay').focus();});
 el('replay').addEventListener('click', () => showScenario(current));
-const unix = 'curl -fsSL https://raw.githubusercontent.com/arnecto/arn/main/scripts/install.sh | sh';
+const unix = 'curl -fsSL https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.sh | sh';
 const platforms = {
-  windows: {shell:'PowerShell · x64',command:'irm https://raw.githubusercontent.com/arnecto/arn/main/scripts/install.ps1 | iex',script:'install.ps1',note:'Open a new terminal after installation, then run arn from your project folder.'},
+  windows: {shell:'PowerShell · x64',command:'irm https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.ps1 | iex',script:'install.ps1',note:'Open a new terminal after installation, then run arn from your project folder.'},
   linux: {shell:'Shell · x64',command:unix,script:'install.sh',note:'Installs to ~/.local/bin. Add that directory to PATH if needed, then run arn from your project folder.'},
   macos: {shell:'Shell · Apple Silicon & Intel',command:'brew install openssl@3\n' + unix,script:'install.sh',note:'Requires Homebrew and OpenSSL 3. Installs to ~/.local/bin; add it to PATH if needed, then run arn.'}
 };
@@ -34,7 +34,7 @@ function selectPlatform(name) {
   el('shell-name').textContent = p.shell;
   el('install-command').textContent = p.command;
   el('install-note').textContent = p.note;
-  el('script-link').href = 'https://github.com/arnecto/arn/blob/main/scripts/' + p.script;
+  el('script-link').href = 'https://github.com/ARN-Forge/ARN-Code/blob/main/scripts/' + p.script;
   el('copy-status').textContent = '';
   document.querySelectorAll('[data-platform]').forEach(b => {const active = b.dataset.platform === name; b.classList.toggle('active', active); b.setAttribute('aria-pressed', String(active));});
 }

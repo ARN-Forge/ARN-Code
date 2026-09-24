@@ -5,7 +5,7 @@
     "publisher": "arnecto",
     "copyright": "Copyright © 2026 arnecto. MIT License.",
     "shortDescription": "Your code. Your next idea.",
-    "homepage": "https://github.com/arnecto/arn",
+    "homepage": "https://github.com/ARN-Forge/ARN-Code",
     "licenseFile": "../../LICENSE",
     "windows": {
       "allowDowngrades": false,

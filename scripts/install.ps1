@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Arn\bin"),
-    [string]$Repository = "arnecto/arn"
+    [string]$Repository = "ARN-Forge/ARN-Code"
 )
 
 $ErrorActionPreference = "Stop"

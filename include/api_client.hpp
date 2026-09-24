@@ -1,19 +1,22 @@
 #pragma once
 
 #include <atomic>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "model_provider.hpp"
+#include "tools/coding_tools.hpp"
+#include <arn/core/agent/agent_session.hpp>
 
 namespace arn {
 
+// Backward-compatibility facade over arn::core::AgentSession for legacy callers
 class ApiClient {
-  public:
+public:
     using StreamCallback = ProviderStreamCallback;
-    ApiClient() = default;
+    ApiClient();
     ~ApiClient();
 
     ApiClient(const ApiClient&) = delete;
@@ -35,14 +38,10 @@ class ApiClient {
     void reset_session();
     [[nodiscard]] std::size_t session_entries() const noexcept;
 
-  private:
+private:
+    std::unique_ptr<::arn::core::AgentSession> session_;
     Provider session_provider_{Provider::none};
     std::string session_model_;
-    std::map<Provider, std::unique_ptr<ModelProvider>> providers_;
-    std::mutex active_request_mutex_;
-    ModelProvider* active_request_provider_{};
-
-    [[nodiscard]] ModelProvider* provider_for(Provider provider);
 };
 
 } // namespace arn

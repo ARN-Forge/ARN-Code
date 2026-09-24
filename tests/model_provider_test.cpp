@@ -19,6 +19,8 @@ int main() {
               "Gemini provider lookup failed");
         check(arn::provider_from_name("deepseek") == arn::Provider::deepseek,
               "DeepSeek provider lookup failed");
+        check(arn::provider_from_name("openrouter") == arn::Provider::openrouter,
+              "OpenRouter provider lookup failed");
         check(arn::provider_from_name("unknown") == arn::Provider::none,
               "Unknown provider was accepted");
         check(!arn::make_provider(arn::Provider::none), "None provider was constructed");
@@ -39,7 +41,17 @@ int main() {
               "DeepSeek provider metadata is invalid");
         check(deepseek->preferred_model({"deepseek-reasoner", "deepseek-chat"}) == "deepseek-chat",
               "DeepSeek default-model policy changed");
-        check(gemini->session_entries() == 0 && deepseek->session_entries() == 0,
+
+        auto openrouter = arn::make_provider(arn::Provider::openrouter);
+        check(openrouter && openrouter->kind() == arn::Provider::openrouter &&
+                  openrouter->name() == "OpenRouter",
+              "OpenRouter provider metadata is invalid");
+        check(openrouter->preferred_model({"anthropic/claude-3.5-sonnet", "openai/gpt-4o"}) ==
+                  "anthropic/claude-3.5-sonnet",
+              "OpenRouter default-model policy changed");
+
+        check(gemini->session_entries() == 0 && deepseek->session_entries() == 0 &&
+                  openrouter->session_entries() == 0,
               "New providers must start without conversation state");
 
         std::cout << "Provider abstraction tests passed\n";

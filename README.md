@@ -1,42 +1,48 @@
-# ARN
+# ARN Code
 
-**ARN is a lightweight native C++23 coding assistant for a project on your
-machine.** It streams answers from Gemini or DeepSeek, can inspect and propose
-file changes, and asks for confirmation before changing anything. The ARN CLI
-itself has no Node.js or Python runtime dependency.
+**ARN Code is a lightweight native C++23 coding assistant for projects on your
+machine.** It streams answers from Gemini, DeepSeek, or OpenRouter, can inspect
+and propose file changes, and asks for confirmation before changing anything.
+The ARN Code CLI has no Node.js or Python runtime dependency.
 
 Use it when you want a small terminal-first assistant—or the included Windows
 IDE—while keeping provider calls, model selection, and local file access under
 your control.
 
-![ARN terminal demo](docs/assets/arn-demo.gif)
+ARN is the broader ecosystem. ARN Code is built on
+[ARN Core](https://github.com/ARN-Forge/arn-core), the reusable native C++23 AI
+agent framework shared by ARN applications.
 
-## What ARN does today
+![ARN Code terminal demo](docs/assets/arn-demo.gif)
+
+## What ARN Code does today
 
 - Runs as a native `arn` executable on Windows, Linux, and macOS release
   targets. Windows also has a portable Tauri 2 + React IDE.
-- Connects to **Google Gemini** and **DeepSeek** using your own API key.
+- Connects to **Google Gemini**, **DeepSeek**, and **OpenRouter** using your own
+  API key.
 - Verifies provider access, discovers the models available to that key, and
   lets you choose a model with `/models` and `/model`.
 - Streams responses, retries temporary API failures, and cancels an active
   request with `Esc` or `Ctrl+C`.
 - Keeps the current conversation in memory only; keys and chat history are not
-  written to ARN configuration files.
+  persisted to disk by ARN Code.
 - Lets a model list and read project files, or request creates, edits, and
   deletions that require explicit approval.
 
 The current provider/model work is **Phase 1** of
 [AGENTS_ROADMAP.md](AGENTS_ROADMAP.md): `ApiClient` is a provider-neutral
-facade, while each provider owns its API details, model discovery, streaming,
-errors, cancellation, and session state. This is an internal architecture
-improvement; it does not add agents, skills, subagents, or automatic model
+facade, while ARN Core provides the common provider interface and reusable
+provider implementations. Provider-specific API details, model discovery,
+streaming, errors, cancellation, and session state remain behind that boundary.
+This architecture does not add agents, skills, subagents, or automatic model
 routing.
 
 ## Install
 
 ### Download a release
 
-The simplest option is the [latest release page](https://github.com/arnecto/arn/releases/latest).
+The simplest option is the [latest release page](https://github.com/ARN-Forge/ARN-Code/releases/latest).
 Download the archive for your platform, extract it, and run `arn` (or
 `arn.exe`). Keep the files from an archive together so the executable can find
 its bundled OpenSSL libraries.
@@ -56,14 +62,18 @@ installer is being prepared for a future tagged release.
 ### CLI install scripts
 
 If you prefer a command-line installation, review the scripts and install the
-latest CLI release:
+latest CLI release.
+
+Run this command in **PowerShell**, not Command Prompt (`cmd.exe`):
 
 ```powershell
-irm https://raw.githubusercontent.com/arnecto/arn/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.ps1 | iex
 ```
 
+On Linux or macOS:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/arnecto/arn/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.sh | sh
 ```
 
 The PowerShell script installs to `%LOCALAPPDATA%\Arn\bin` and adds it to the
@@ -76,7 +86,7 @@ brew install openssl@3
 
 ## First request
 
-Open a terminal in the project you want ARN to work on and start it:
+Open a terminal in the project you want ARN Code to work on and start the CLI:
 
 ```text
 arn
@@ -91,17 +101,18 @@ Then configure one provider for this session:
 Explain how this project is organized.
 ```
 
-Use `/key-deepseek` for DeepSeek instead. `/help` lists all interactive
-commands, including `/provider`, `/status`, `/clear-session`, and `/clear`.
+Use `/key-deepseek` for DeepSeek or `/key-openrouter` for OpenRouter instead.
+`/help` lists all interactive commands, including `/provider`, `/status`,
+`/clear-session`, and `/clear`.
 
-API keys stay in process memory until ARN exits. Do not put keys in commands
+API keys stay in process memory until ARN Code exits. Do not put keys in commands
 you plan to share, commits, issue reports, or screenshots. Provider usage may
 incur charges and is subject to the provider's quota and availability.
 
 ## Safe local tools
 
-ARN treats the directory where it starts as the project root. A model may use
-these tools:
+ARN Code treats the directory where it starts as the project root. A model may
+use these tools:
 
 - `list_files` and `read_file` inspect the project.
 - `write_file` and `replace_text` show the proposed content or change and wait
@@ -109,17 +120,17 @@ these tools:
 - `delete_file` requires an explicit request and confirmation.
 
 Paths are confined to the project root, including checks intended to prevent
-escapes through `..` and links. ARN protects `.git`, environment and common
+escapes through `..` and links. ARN Code protects `.git`, environment and common
 secret files, and limits reads to 256 KiB. It does not execute shell commands.
 The IDE applies the same confirmation protocol and keeps unsaved editor buffers
 from being overwritten by an approved agent operation.
 
-## ARN IDE
+## ARN Code IDE
 
-The optional Windows desktop IDE uses Tauri 2, React, and Monaco for the user
-interface. It does **not** reimplement provider or file-tool logic in Rust: it
-starts the existing C++ executable with `arn --server` and exchanges JSONL
-messages with it.
+The optional Windows desktop IDE for ARN Code uses Tauri 2, React, and Monaco
+for the user interface. It does **not** reimplement provider or file-tool logic
+in Rust: it starts the existing C++ executable with `arn --server` and exchanges
+JSONL messages with it.
 
 It includes a project file tree, multi-tab editor, provider verification and
 model selection, streamed chat, cancellation, and a before/after review for
@@ -131,6 +142,13 @@ test commands.
 
 Building the CLI requires CMake 3.20+, a C++23 compiler, OpenSSL development
 files, Git, and network access for CMake's fetched dependencies.
+
+Clone the canonical repository first:
+
+```bash
+git clone https://github.com/ARN-Forge/ARN-Code.git
+cd ARN-Code
+```
 
 ### Windows
 
@@ -171,13 +189,13 @@ runtime requirements.
 ## Architecture
 
 ```text
-terminal UI / ARN IDE
+ARN Code terminal UI / desktop IDE
           |
      ApiClient facade
           |
-     ModelProvider interface
-       |              |
-  Gemini provider  DeepSeek provider
+     ARN Core ModelProvider interface
+       |              |               |
+  Gemini provider  DeepSeek provider  OpenRouter provider
           |
      HTTPS + streaming API
 
@@ -185,12 +203,13 @@ terminal UI / ARN IDE
 ```
 
 Provider-specific authentication, request formats, streaming parsing, model
-discovery, errors, cancellation, and session history stay behind the provider
-interface. The terminal UI, JSONL server, and IDE consume the common behavior.
+discovery, errors, cancellation, and session history stay behind ARN Core's
+provider interface. The ARN Code terminal UI, JSONL server, and IDE consume the
+common behavior.
 
 ## Current limits and roadmap
 
-ARN is still an early project. It has no persistent configuration, shell
+ARN Code is still an early project. It has no persistent configuration, shell
 execution, integrated terminal, debugger, Git UI, offline model backend, or
 guarantee that a provider accepts a particular key or model. Real provider
 requests require your own valid credentials; local builds and tests do not
@@ -198,7 +217,7 @@ prove provider access.
 
 [AGENTS_ROADMAP.md](AGENTS_ROADMAP.md) describes later work. Agents, skills,
 automatic agent/model routing, and subagents are planned concepts and are not
-current ARN features.
+current ARN Code features.
 
 ## Development and security
 
