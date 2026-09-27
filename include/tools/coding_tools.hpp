@@ -7,6 +7,7 @@
 
 #include <nlohmann/json.hpp>
 #include <arn/core/confirmation/confirmation_request.hpp>
+#include <arn/core/agent/agent_runtime.hpp>
 #include <arn/core/tool/tool.hpp>
 #include <arn/core/tool/tool_registry.hpp>
 
@@ -85,6 +86,12 @@ void register_coding_tools(::arn::core::ToolRegistry& registry,
 [[nodiscard]] std::shared_ptr<::arn::core::ToolRegistry>
 create_coding_tool_registry(const std::filesystem::path& project_root,
                             std::function<void()> on_change = {});
+
+// Reuses the same sandboxed coding tools while adding the trusted operation
+// classifications required by AgentRuntime permission filtering.
+[[nodiscard]] std::vector<::arn::core::AgentToolBinding>
+create_agent_tool_bindings(const std::filesystem::path& project_root,
+                           std::function<void()> on_change = {});
 
 // Composition helper for ARN coding tools in a workspace
 class ToolExecutor {

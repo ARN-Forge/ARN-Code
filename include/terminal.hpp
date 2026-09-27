@@ -17,6 +17,7 @@ enum class TerminalEventType {
     character,
     enter,
     backspace,
+    escape,
     tab,
     resize,
     wheel_up,

@@ -57,7 +57,7 @@ std::string read_available_sequence(int first_timeout_ms = 20) {
 
 arn::TerminalEvent decode_escape_sequence(const std::string& sequence) {
     using Type = arn::TerminalEventType;
-    if (sequence.empty()) return {Type::interrupt, {}};
+    if (sequence.empty()) return {Type::escape, {}};
     if (sequence == "OQ" || sequence == "[12~") return {Type::f2, {}};
     if (sequence == "[5~") return {Type::page_up, {}};
     if (sequence == "[6~") return {Type::page_down, {}};

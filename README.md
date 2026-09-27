@@ -95,18 +95,20 @@ arn
 Then configure one provider for this session:
 
 ```text
-/key-gemini YOUR_KEY
+/key-gemini
 /models
 /model gemini-...
 Explain how this project is organized.
 ```
 
 Use `/key-deepseek` for DeepSeek or `/key-openrouter` for OpenRouter instead.
+ARN then opens a masked prompt; the key is never echoed and remains in memory only.
 `/help` lists all interactive commands, including `/provider`, `/status`,
 `/clear-session`, and `/clear`.
 
-API keys stay in process memory until ARN Code exits. Do not put keys in commands
-you plan to share, commits, issue reports, or screenshots. Provider usage may
+API keys stay in process memory until ARN Code exits. Inline key arguments are
+disabled, so enter keys only through the masked prompt. Never put keys in commits,
+issue reports, or screenshots. Provider usage may
 incur charges and is subject to the provider's quota and availability.
 
 ## Safe local tools

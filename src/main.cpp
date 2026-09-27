@@ -1,4 +1,6 @@
 #include "agent/coding_prompt.hpp"
+#include "agent_workflow.hpp"
+#include "cli_support.hpp"
 #include "model_provider.hpp"
 #include "server.hpp"
 #include "terminal.hpp"
@@ -220,7 +222,7 @@ private:
     bool context_{};
 };
 
-constexpr std::array command_hints{"/key-gemini", "/key-deepseek", "/model", "/models", "/provider", "/status", "/clear-session", "/clear", "/help", "/exit"};
+constexpr std::array command_hints{"/agent", "/key-gemini", "/key-deepseek", "/key-openrouter", "/model", "/models", "/provider", "/status", "/clear-session", "/clear", "/help", "/exit"};
 
 std::string input_hint(std::string_view input) {
     if (!input.starts_with('/') || input.find_first_of(" \t") != std::string_view::npos) {
@@ -289,6 +291,28 @@ std::string read_line(Ui& ui, arn::TerminalSession& terminal) {
     }
 }
 
+std::optional<std::string> read_api_key(Ui& ui, arn::TerminalSession& terminal,
+                                        std::string_view provider_name) {
+    arn::SecretInputBuffer input;
+    ui.status(std::string(provider_name) + " API key: type securely below");
+    ui.hint("Enter submits · Esc or Ctrl+C cancels · key is kept in memory only");
+    ui.input({});
+    ui.render();
+    while (input.state() == arn::SecretInputState::editing) {
+        const auto event = terminal.read_event();
+        if (event.type == arn::TerminalEventType::resize) {
+            ui.render();
+            continue;
+        }
+        input.consume(event);
+        ui.input(input.masked());
+        ui.render_input();
+    }
+    ui.input({});
+    ui.hint({});
+    return input.take_submitted_secret();
+}
+
 int run() {
     arn::TerminalSession terminal;
     Ui ui(terminal);
@@ -304,7 +328,11 @@ int run() {
     for (;;) {
         const auto input = normalize_command(trim(read_line(ui, terminal)));
         if (input.empty()) { refresh(); continue; }
-        ui.add(Tone::user, "arn › " + input);
+        const auto separator = input.find_first_of(" \t");
+        const auto command = input.front() == '/'
+            ? lower_ascii(input.substr(0, separator)) : std::string{};
+        const auto argument = separator == std::string::npos ? "" : trim(input.substr(separator + 1));
+        ui.add(Tone::user, "arn › " + arn::safe_command_echo(input));
         if (input.front() != '/') {
             ui.add(Tone::normal, {}); ui.status("Arnie is working… Esc or Ctrl+C cancels"); refresh();
             std::atomic_bool cancelled = false;
@@ -330,16 +358,46 @@ int run() {
             else if (result.message.empty()) ui.add(Tone::muted, "Done.");
             ui.status("Type /help for commands · F2 copy mode"); refresh(); continue;
         }
-        const auto separator = input.find_first_of(" \t");
-        const auto command = lower_ascii(input.substr(0, separator));
-        const auto argument = separator == std::string::npos ? "" : trim(input.substr(separator + 1));
         if (command == "/exit" || command == "/quit") return 0;
         if (command == "/clear") ui.clear();
-        else if (command == "/help") ui.add(Tone::muted, "Commands: /key-gemini <key>, /key-deepseek <key>, /key-openrouter <key>, /model <name>, /models, /provider <name>, /status, /clear-session, /clear, /exit");
+        else if (command == "/help") {
+            for (const auto& line : arn::help_lines()) ui.add(Tone::muted, line);
+        }
         else if (command == "/status") ui.add(Tone::normal, "Provider: " + arn::provider_name(provider) + " | Model: " + (model.empty() ? "not selected" : model) + " | API key: " + (key.empty() ? "not set" : "set") + " | Context: " + (session.session_entries() ? "active" : "empty"));
         else if (command == "/clear-session") { session.reset_session(); ui.add(Tone::good, "Chat context cleared. Key and model are unchanged."); }
         else if (command == "/models") { if (models.empty()) ui.add(Tone::warning, "No verified API key is active."); else for (const auto& name : models) ui.add(Tone::normal, "• " + name); }
-        else if (command == "/provider") {
+        else if (const auto agent_task = arn::parse_agent_command(input); agent_task) {
+            auto workflow = arn::create_agent_orchestrator({
+                .provider = provider,
+                .api_key = key,
+                .model = model,
+                .project_root = tools.project_root(),
+            });
+            std::atomic_bool cancelled = false;
+            arn::TerminalCancellationMonitor watcher(
+                cancelled, [&workflow] { workflow->cancel_active_workflow(); });
+            const auto confirm = [&](const arn::core::ConfirmationRequest& request) {
+                watcher.pause_input();
+                ui.status("Allow file change? " + request.summary + " [y/N]");
+                refresh();
+                const int answer = terminal.read_confirmation();
+                ui.status("Type /help for commands · F2 copy mode");
+                watcher.resume_input();
+                return answer == 'y' || answer == 'Y';
+            };
+            const auto output = [&](arn::AgentOutputLevel level, std::string text) {
+                Tone tone = Tone::normal;
+                if (level == arn::AgentOutputLevel::good) tone = Tone::good;
+                else if (level == arn::AgentOutputLevel::warning) tone = Tone::warning;
+                else if (level == arn::AgentOutputLevel::error) tone = Tone::error;
+                ui.add(tone, std::move(text));
+                refresh();
+            };
+            ui.status("Multi-agent workflow running… Esc or Ctrl+C cancels");
+            refresh();
+            (void)arn::run_agent_command(*agent_task, tools.project_root(), *workflow,
+                                         {.output = output}, confirm);
+        } else if (command == "/provider") {
             const auto selected = arn::provider_from_name(lower_ascii(argument));
             if (selected == arn::Provider::none) ui.add(Tone::warning, "Supported providers: gemini, deepseek, openrouter");
             else { provider = selected; key.clear(); model.clear(); models.clear(); session.reset_session(); ui.add(Tone::good, "Active provider: " + arn::provider_name(provider)); }
@@ -347,17 +405,31 @@ int run() {
             const auto selected = command == "/key-gemini" ? arn::Provider::gemini
                                 : (command == "/key-deepseek" ? arn::Provider::deepseek
                                                              : arn::Provider::openrouter);
+            if (!argument.empty()) {
+                ui.add(Tone::warning, "Inline API key entry is disabled. Run " + command +
+                                      " without an argument to enter it securely.");
+                ui.status("Type /help for commands · F2 copy mode");
+                refresh();
+                continue;
+            }
+            const auto candidate = read_api_key(ui, terminal, arn::provider_name(selected));
+            if (!candidate) {
+                ui.add(Tone::warning, "API key entry cancelled or empty. Existing configuration is unchanged.");
+                ui.status("Type /help for commands · F2 copy mode");
+                refresh();
+                continue;
+            }
             ui.status("Verifying API key…"); refresh();
             auto prov = arn::make_provider(selected);
             if (!prov) {
                 ui.add(Tone::error, "Provider not available.");
             } else {
-                const auto result = session.configure_provider(std::move(prov), remove_quotes(argument));
+                const auto result = session.configure_provider(std::move(prov), *candidate);
                 if (!result.ok || session.available_models().empty()) {
                     ui.add(Tone::error, "Key was not saved: " + (result.ok ? "no text-generation models are available." : result.message));
                 } else {
                     provider = selected;
-                    key = remove_quotes(argument);
+                    key = *candidate;
                     models = session.available_models();
                     model = session.preferred_model();
                     session.select_model(model);

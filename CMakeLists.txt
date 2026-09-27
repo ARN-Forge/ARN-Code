@@ -73,6 +73,8 @@ add_executable(arn
     src/main.cpp
     src/model_provider.cpp
     src/api_client.cpp
+    src/agent_workflow.cpp
+    src/cli_support.cpp
     src/config_manager.cpp
     src/tools/workspace_sandbox.cpp
     src/tools/coding_tools.cpp
@@ -108,6 +110,10 @@ if (BUILD_TESTING)
     target_include_directories(confirmation_test PRIVATE include)
     target_link_libraries(confirmation_test PRIVATE arn::core nlohmann_json::nlohmann_json Threads::Threads)
     add_test(NAME confirmations_and_tools COMMAND confirmation_test)
+    set(_arn_code_test_temp "${CMAKE_CURRENT_BINARY_DIR}/test-tmp")
+    file(MAKE_DIRECTORY "${_arn_code_test_temp}")
+    set_tests_properties(confirmations_and_tools PROPERTIES
+        ENVIRONMENT "TEMP=${_arn_code_test_temp};TMP=${_arn_code_test_temp}")
     add_executable(arn_server_fixture tests/server_fixture.cpp
                                       src/server.cpp
                                       src/tools/workspace_sandbox.cpp
@@ -117,7 +123,9 @@ if (BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter)
     if (Python3_FOUND)
         add_test(NAME server_protocol COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/server_protocol_test.py $<TARGET_FILE:arn_server_fixture>)
-        set_tests_properties(server_protocol PROPERTIES TIMEOUT 30)
+        set_tests_properties(server_protocol PROPERTIES
+            TIMEOUT 30
+            ENVIRONMENT "TEMP=${_arn_code_test_temp};TMP=${_arn_code_test_temp}")
     endif()
     add_executable(architecture_test tests/architecture_test.cpp)
     if (TARGET arn_core)
@@ -131,9 +139,81 @@ if (BUILD_TESTING)
     target_link_libraries(architecture_test PRIVATE arn::core)
     add_test(NAME architecture_boundary COMMAND architecture_test)
 
+    add_executable(agent_workflow_test tests/agent_workflow_test.cpp
+                                       src/agent_workflow.cpp
+                                       src/model_provider.cpp
+                                       src/tools/workspace_sandbox.cpp
+                                       src/tools/coding_tools.cpp)
+    target_include_directories(agent_workflow_test PRIVATE include)
+    target_link_libraries(agent_workflow_test PRIVATE arn::core nlohmann_json::nlohmann_json Threads::Threads)
+    add_test(NAME agent_workflow COMMAND agent_workflow_test)
+
+    add_executable(cli_support_test tests/cli_support_test.cpp src/cli_support.cpp)
+    target_include_directories(cli_support_test PRIVATE include)
+    add_test(NAME cli_support COMMAND cli_support_test)
+
     if (MSVC)
         target_compile_options(confirmation_test PRIVATE /utf-8)
         target_compile_options(arn_server_fixture PRIVATE /utf-8)
         target_compile_options(architecture_test PRIVATE /utf-8)
+        target_compile_options(agent_workflow_test PRIVATE /utf-8)
+        target_compile_options(cli_support_test PRIVATE /utf-8)
     endif()
+endif()
+
+if (WIN32)
+    set(_arn_code_runtime_targets arn)
+    if (BUILD_TESTING)
+        list(APPEND _arn_code_runtime_targets
+            model_list_test model_provider_test confirmation_test
+            arn_server_fixture architecture_test agent_workflow_test)
+        list(APPEND _arn_code_runtime_targets cli_support_test)
+    endif()
+    set(ARN_CODE_RUNTIME_EXECUTABLES "")
+    set(ARN_CODE_RUNTIME_DIRS "$<TARGET_FILE_DIR:arn>")
+    foreach(_target IN LISTS _arn_code_runtime_targets)
+        list(APPEND ARN_CODE_RUNTIME_EXECUTABLES "$<TARGET_FILE:${_target}>")
+        list(APPEND ARN_CODE_RUNTIME_DIRS "$<TARGET_FILE_DIR:${_target}>")
+    endforeach()
+    foreach(_include IN LISTS OPENSSL_INCLUDE_DIR)
+        get_filename_component(_prefix "${_include}" DIRECTORY)
+        list(APPEND ARN_CODE_RUNTIME_DIRS "${_prefix}/bin" "${_prefix}")
+    endforeach()
+    if (OPENSSL_ROOT_DIR)
+        list(APPEND ARN_CODE_RUNTIME_DIRS "${OPENSSL_ROOT_DIR}/bin" "${OPENSSL_ROOT_DIR}")
+    endif()
+    foreach(_target OpenSSL::SSL OpenSSL::Crypto)
+        if (TARGET ${_target})
+            list(APPEND ARN_CODE_RUNTIME_DIRS "$<TARGET_FILE_DIR:${_target}>")
+        endif()
+    endforeach()
+    if (MSVC)
+        get_filename_component(_linker_dir "${CMAKE_LINKER}" DIRECTORY)
+        find_program(ARN_CODE_PE_SCANNER NAMES dumpbin HINTS "${_linker_dir}" REQUIRED)
+        set(ARN_CODE_PE_TOOL dumpbin)
+    else()
+        get_filename_component(_objdump_dir "${CMAKE_OBJDUMP}" DIRECTORY)
+        find_program(ARN_CODE_PE_SCANNER NAMES objdump HINTS "${_objdump_dir}" REQUIRED)
+        set(ARN_CODE_PE_TOOL objdump)
+    endif()
+    configure_file(cmake/DeployRuntime.cmake.in
+        "${CMAKE_CURRENT_BINARY_DIR}/DeployRuntime.configured.cmake" @ONLY)
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/DeployRuntime-$<CONFIG>.cmake"
+        INPUT "${CMAKE_CURRENT_BINARY_DIR}/DeployRuntime.configured.cmake")
+    # Make every executable launchable as soon as its own target finishes.
+    # The ALL target below remains useful when dependencies change or a deployed
+    # DLL is removed without forcing the executable to relink.
+    foreach(_target IN LISTS _arn_code_runtime_targets)
+        add_custom_command(TARGET ${_target} POST_BUILD
+            COMMAND "${CMAKE_COMMAND}"
+                "-DARN_CODE_RUNTIME_EXECUTABLE=$<TARGET_FILE:${_target}>"
+                -P "${CMAKE_CURRENT_BINARY_DIR}/DeployRuntime-$<CONFIG>.cmake"
+            COMMENT "Deploying runtime dependencies for ${_target}"
+            VERBATIM)
+    endforeach()
+    add_custom_target(arn_code_runtime ALL
+        COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/DeployRuntime-$<CONFIG>.cmake"
+        DEPENDS ${_arn_code_runtime_targets}
+        COMMENT "Deploying runtime dependencies for ARN Code executables"
+        VERBATIM)
 endif()

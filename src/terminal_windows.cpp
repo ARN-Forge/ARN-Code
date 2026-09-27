@@ -138,6 +138,7 @@ TerminalEvent TerminalSession::read_event() {
         case VK_NEXT: return {TerminalEventType::page_down, {}};
         case VK_END: return {TerminalEventType::end, {}};
         case VK_BACK: return {TerminalEventType::backspace, {}};
+        case VK_ESCAPE: return {TerminalEventType::escape, {}};
         case VK_TAB: return {TerminalEventType::tab, {}};
         default: break;
         }

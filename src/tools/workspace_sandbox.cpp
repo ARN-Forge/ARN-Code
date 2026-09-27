@@ -36,7 +36,7 @@ bool contains_protected_component(const std::filesystem::path& path) {
 }
 
 std::filesystem::path safe_path(const std::filesystem::path& root, const std::string& path_str,
-                                bool /*allow_missing_leaf*/, std::string& error) {
+                                bool allow_missing_leaf, std::string& error) {
     if (path_str.empty()) {
         error = "A path is required.";
         return {};
@@ -61,10 +61,29 @@ std::filesystem::path safe_path(const std::filesystem::path& root, const std::st
         error = "Protected file or directory.";
         return {};
     }
-    // Resolve the entire target, including an existing leaf symlink.
-    const auto resolved = std::filesystem::weakly_canonical(target, ec);
+    // Resolve existing components so directory and leaf symlinks cannot escape.
+    // MSVC's weakly_canonical may fail for a missing leaf in restricted Windows
+    // environments, so writes resolve the nearest existing ancestor and append
+    // only the still-missing lexical suffix.
+    std::filesystem::path resolved;
+    if (allow_missing_leaf && !std::filesystem::exists(target, ec) && !ec) {
+        std::filesystem::path ancestor = target;
+        std::filesystem::path suffix;
+        while (!std::filesystem::exists(ancestor, ec) && !ec) {
+            const auto parent = ancestor.parent_path();
+            if (parent.empty() || parent == ancestor) break;
+            suffix = suffix.empty() ? ancestor.filename() : ancestor.filename() / suffix;
+            ancestor = parent;
+        }
+        if (!ec && std::filesystem::exists(ancestor, ec)) {
+            const auto ancestor_real = std::filesystem::canonical(ancestor, ec);
+            if (!ec) resolved = (ancestor_real / suffix).lexically_normal();
+        }
+    } else if (!ec) {
+        resolved = std::filesystem::weakly_canonical(target, ec);
+    }
 
-    if (ec || !is_within(root_real, resolved)) {
+    if (ec || resolved.empty() || !is_within(root_real, resolved)) {
         error = "The requested path escapes the project folder.";
         return {};
     }

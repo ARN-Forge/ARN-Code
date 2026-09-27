@@ -56,7 +56,11 @@ int main() {
     check(confirmations == 0);
     check(!tools.execute("write_file", {{"path", "x.txt"}, {"content", "one"}}, no).ok);
     check(!std::filesystem::exists(root / "project/x.txt"));
-    check(tools.execute("write_file", {{"path", "x.txt"}, {"content", "one"}}, yes).ok);
+    const auto initial_write =
+        tools.execute("write_file", {{"path", "x.txt"}, {"content", "one"}}, yes);
+    if (!initial_write.ok)
+        std::cerr << "Initial write failed: " << initial_write.error_message << '\n';
+    check(initial_write.ok);
     check(!tools
                .execute("replace_text",
                         {{"path", "x.txt"}, {"old_text", "one"}, {"new_text", "two"}},

@@ -271,6 +271,25 @@ create_coding_tool_registry(const std::filesystem::path& project_root,
     return registry;
 }
 
+std::vector<::arn::core::AgentToolBinding>
+create_agent_tool_bindings(const std::filesystem::path& project_root,
+                           std::function<void()> on_change) {
+    using ::arn::core::AgentToolBinding;
+    using ::arn::core::OperationClass;
+    return {
+        AgentToolBinding{std::make_shared<ListFilesTool>(project_root),
+                         {OperationClass::read_file}},
+        AgentToolBinding{std::make_shared<ReadFileTool>(project_root),
+                         {OperationClass::read_file}},
+        AgentToolBinding{std::make_shared<WriteFileTool>(project_root, on_change),
+                         {OperationClass::write_file}},
+        AgentToolBinding{std::make_shared<ReplaceTextTool>(project_root, on_change),
+                         {OperationClass::write_file}},
+        AgentToolBinding{std::make_shared<DeleteFileTool>(project_root, std::move(on_change)),
+                         {OperationClass::delete_file}},
+    };
+}
+
 // ToolExecutor implementation
 ToolExecutor::ToolExecutor(std::filesystem::path project_root, std::function<void()> on_change)
     : on_change_(std::move(on_change)),
