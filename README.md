@@ -29,60 +29,56 @@ agent framework shared by ARN applications.
   persisted to disk by ARN Code.
 - Lets a model list and read project files, or request creates, edits, and
   deletions that require explicit approval.
+- Provides Explorer, Planner, Coder, and Reviewer workflows through `/agent`,
+  with the same provider, sandbox, and confirmation boundaries as normal chat.
 
 The current provider/model work is **Phase 1** of
 [AGENTS_ROADMAP.md](AGENTS_ROADMAP.md): `ApiClient` is a provider-neutral
 facade, while ARN Core provides the common provider interface and reusable
 provider implementations. Provider-specific API details, model discovery,
 streaming, errors, cancellation, and session state remain behind that boundary.
-This architecture does not add agents, skills, subagents, or automatic model
-routing.
 
 ## Install
 
-### Download a release
+### Windows
 
-The simplest option is the [latest release page](https://github.com/ARN-Forge/ARN-Code/releases/latest).
-Download the archive for your platform, extract it, and run `arn` (or
-`arn.exe`). Keep the files from an archive together so the executable can find
-its bundled OpenSSL libraries.
+Run this in **PowerShell**, not Command Prompt (`cmd.exe`):
+
+```powershell
+irm https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.ps1 | iex
+arn
+```
+
+The installer uses `%LOCALAPPDATA%\Arn\bin`, adds it to your user `PATH`, and
+verifies the installed executable. Open a new terminal if `arn` is not yet
+visible in another terminal window.
+
+### Linux and macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.sh | sh
+arn
+```
+
+The script installs to `~/.local/bin`, adds that directory to your shell
+profile when needed, and verifies the executable. On macOS, install the
+OpenSSL runtime first with `brew install openssl@3`.
+
+### Manual download
+
+Download an archive from the [latest release page](https://github.com/ARN-Forge/ARN-Code/releases/latest),
+extract it, and keep its files together so the executable can find its bundled
+runtime libraries.
 
 Available release archives are:
 
 - **Windows x64 CLI:** `arn-windows-x64.zip`
 - **Windows x64 IDE:** `arn-ide-windows-x64.zip` — extract it and start
   `arn-ide.exe`. It requires the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
+- **Windows x64 IDE installer:** `arn-ide-windows-x64-setup.exe`
 - **Linux x64 CLI:** `arn-linux-x64.tar.gz`
 - **macOS Apple Silicon CLI:** `arn-macos-arm64.tar.gz`
 - **macOS Intel CLI:** `arn-macos-x64.tar.gz`
-
-The Windows IDE is currently distributed as a portable ZIP. A branded setup
-installer is being prepared for a future tagged release.
-
-### CLI install scripts
-
-If you prefer a command-line installation, review the scripts and install the
-latest CLI release.
-
-Run this command in **PowerShell**, not Command Prompt (`cmd.exe`):
-
-```powershell
-irm https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.ps1 | iex
-```
-
-On Linux or macOS:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.sh | sh
-```
-
-The PowerShell script installs to `%LOCALAPPDATA%\Arn\bin` and adds it to the
-current user's `PATH`. The shell script installs to `~/.local/bin` by default.
-On macOS, install the OpenSSL runtime first:
-
-```bash
-brew install openssl@3
-```
 
 ## First request
 
@@ -105,6 +101,18 @@ Use `/key-deepseek` for DeepSeek or `/key-openrouter` for OpenRouter instead.
 ARN then opens a masked prompt; the key is never echoed and remains in memory only.
 `/help` lists all interactive commands, including `/provider`, `/status`,
 `/clear-session`, and `/clear`.
+
+Provider and agent commands:
+
+- `/provider <gemini|deepseek|openrouter>` changes the active provider.
+- `/models` lists models returned for the verified account.
+- `/model <name>` selects one of those models.
+- `/agent <task>` runs Explorer → Planner, asks whether to continue, then runs
+  Coder → Reviewer.
+- `/agent --auto <task>` runs the same workflow without the plan checkpoint;
+  every requested file change still needs confirmation.
+- `/agent explorer <task>`, `/agent planner <task>`, `/agent coder <task>`, and
+  `/agent reviewer <task>` run one profile directly.
 
 API keys stay in process memory until ARN Code exits. Inline key arguments are
 disabled, so enter keys only through the masked prompt. Never put keys in commits,
@@ -217,9 +225,9 @@ guarantee that a provider accepts a particular key or model. Real provider
 requests require your own valid credentials; local builds and tests do not
 prove provider access.
 
-[AGENTS_ROADMAP.md](AGENTS_ROADMAP.md) describes later work. Agents, skills,
-automatic agent/model routing, and subagents are planned concepts and are not
-current ARN Code features.
+[AGENTS_ROADMAP.md](AGENTS_ROADMAP.md) describes later work. The initial
+Explorer, Planner, Coder, and Reviewer profiles are available. Skills,
+automatic model routing, and isolated subagents remain planned concepts.
 
 ## Development and security
 

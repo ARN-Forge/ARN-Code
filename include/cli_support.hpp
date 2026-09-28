@@ -11,6 +11,13 @@ namespace arn {
 
 enum class SecretInputState { editing, submitted, cancelled };
 
+enum class ApiKeyCommand { gemini, deepseek, openrouter };
+
+struct ParsedApiKeyCommand {
+    ApiKeyCommand command;
+    bool has_inline_value{};
+};
+
 class SecretInputBuffer {
 public:
     void consume(const TerminalEvent& event);
@@ -25,7 +32,11 @@ private:
     SecretInputState state_{SecretInputState::editing};
 };
 
+[[nodiscard]] std::optional<ParsedApiKeyCommand>
+parse_api_key_command(std::string_view input);
 [[nodiscard]] std::string safe_command_echo(std::string_view input);
+// Live editor shows masked arguments; transcript echo omits them entirely.
+[[nodiscard]] std::string safe_command_display(std::string_view input);
 [[nodiscard]] std::vector<std::string> help_lines();
 
 } // namespace arn

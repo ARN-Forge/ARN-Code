@@ -27,6 +27,13 @@ bool is_key_command(std::string_view command) {
         command == "/key-openrouter";
 }
 
+std::string_view trim_ascii_whitespace(std::string_view text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) return {};
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
 } // namespace
 
 void SecretInputBuffer::consume(const TerminalEvent& event) {
@@ -69,10 +76,44 @@ std::optional<std::string> SecretInputBuffer::take_submitted_secret() {
     return std::exchange(secret_, {});
 }
 
+std::optional<ParsedApiKeyCommand> parse_api_key_command(std::string_view input) {
+    input = trim_ascii_whitespace(input);
+    const auto separator = input.find_first_of(" \t\r\n");
+    const auto command = lower_ascii(std::string(input.substr(0, separator)));
+    if (!is_key_command(command)) return std::nullopt;
+
+    const auto remainder = separator == std::string_view::npos
+        ? std::string_view{} : trim_ascii_whitespace(input.substr(separator + 1));
+    const auto kind = command == "/key-gemini" ? ApiKeyCommand::gemini
+        : command == "/key-deepseek" ? ApiKeyCommand::deepseek
+                                      : ApiKeyCommand::openrouter;
+    return ParsedApiKeyCommand{kind, !remainder.empty()};
+}
+
 std::string safe_command_echo(std::string_view input) {
-    const auto separator = input.find_first_of(" \t");
-    auto command = lower_ascii(std::string(input.substr(0, separator)));
-    return is_key_command(command) ? std::move(command) : std::string(input);
+    const auto parsed = parse_api_key_command(input);
+    if (!parsed) return std::string(input);
+    switch (parsed->command) {
+    case ApiKeyCommand::gemini: return "/key-gemini";
+    case ApiKeyCommand::deepseek: return "/key-deepseek";
+    case ApiKeyCommand::openrouter: return "/key-openrouter";
+    }
+    return {};
+}
+
+std::string safe_command_display(std::string_view input) {
+    const auto parsed = parse_api_key_command(input);
+    if (!parsed) return std::string(input);
+    auto display = safe_command_echo(input);
+    if (!parsed->has_inline_value) return display;
+    input = trim_ascii_whitespace(input);
+    const auto separator = input.find_first_of(" \t\r\n");
+    const auto argument = input.substr(separator + 1);
+    display += ' ';
+    for (const unsigned char byte : argument) {
+        if ((byte & 0xC0) != 0x80) display += '*';
+    }
+    return display;
 }
 
 std::vector<std::string> help_lines() {

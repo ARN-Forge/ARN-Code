@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -52,9 +53,30 @@ void cancellation_and_empty_input_preserve_existing_key() {
 
 void key_commands_are_safe_to_echo() {
     const std::string placeholder = "unit-test-secret";
-    const auto echoed = arn::safe_command_echo("/key-gemini " + placeholder);
-    check(echoed == "/key-gemini" && echoed.find(placeholder) == std::string::npos,
-          "Inline key text is never echoed");
+    const std::pair<std::string, arn::ApiKeyCommand> commands[] = {
+        {"/key-gemini", arn::ApiKeyCommand::gemini},
+        {"/key-deepseek", arn::ApiKeyCommand::deepseek},
+        {"/key-openrouter", arn::ApiKeyCommand::openrouter},
+    };
+    for (const auto& [command, kind] : commands) {
+        const auto exact = arn::parse_api_key_command(command);
+        check(exact && exact->command == kind && !exact->has_inline_value,
+              "Exact key command enters secure-input path");
+
+        const auto surrounded = arn::parse_api_key_command("  \t" + command + " \r\n");
+        check(surrounded && !surrounded->has_inline_value,
+              "Surrounding whitespace preserves zero-argument command");
+
+        const auto inline_value = arn::parse_api_key_command(command + " " + placeholder);
+        check(inline_value && inline_value->has_inline_value,
+              "Inline key value is rejected before secure input");
+        const auto echoed = arn::safe_command_echo(command + " " + placeholder);
+        check(echoed == command && echoed.find(placeholder) == std::string::npos,
+              "Inline key text is never echoed");
+    }
+    check(!arn::parse_api_key_command("/status"), "Normal commands remain unaffected");
+    check(arn::safe_command_echo("/status") == "/status",
+          "Normal command display remains unchanged");
 }
 
 void help_is_line_based() {
@@ -80,6 +102,25 @@ void help_is_line_based() {
 } // namespace
 
 int main() {
+    // Real-terminal trace: Tab completed /key to /key-gemini + space;
+    // 53 printable bytes reached the editor before Enter (65 total bytes).
+    for (const std::string command : {"/key-gemini", "/key-deepseek", "/key-openrouter"}) {
+        std::string buffer = command + " ";
+        check(arn::safe_command_display(buffer) == command,
+              "Completion whitespace is not an inline value");
+        for (int i = 0; i < 53; ++i) {
+            buffer += 'X'; // Synthetic data, never the user's redacted input.
+            check(arn::safe_command_display(buffer) == command + " " + std::string(i + 1, '*'),
+                  "Every appended inline character is visibly masked before submission");
+        }
+        check(arn::parse_api_key_command(buffer)->has_inline_value,
+              "Observed inline sequence must still be rejected");
+        check(arn::safe_command_echo(buffer) == command,
+              "Transcript contains no inline value or masks");
+        buffer.resize(command.size());
+        check(!arn::parse_api_key_command(buffer)->has_inline_value,
+              "Removing inline content restores secure-prompt command");
+    }
     secure_input_is_masked_and_editable();
     cancellation_and_empty_input_preserve_existing_key();
     key_commands_are_safe_to_echo();

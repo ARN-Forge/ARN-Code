@@ -25,7 +25,8 @@ test('deployed backend loads with only Windows on PATH', () => {
 });
 test('deployed server starts in a separate project and handles EOF', () => {
   const messages = run(['--server'], '').trim().split(/\r?\n/).map(s => JSON.parse(s));
-  assert.ok(messages.some(m => m.type === 'ready' && m.protocol === 2));
+  assert.ok(messages.some(m => m.type === 'ready' && m.protocol === 2 &&
+    path.resolve(m.workspace) === path.resolve(cwd)));
   assert.deepEqual(readdirSync(cwd), [], 'Server startup must not create project files');
 });
 test.after(() => rmdirSync(cwd)); // Empty test directory only; never recursive.

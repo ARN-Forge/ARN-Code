@@ -201,7 +201,9 @@ struct Server {
 
 int run_server() {
     Server server;
-    emit({{"type", "ready"}, {"protocol", 2}});
+    emit({{"type", "ready"},
+          {"protocol", 2},
+          {"workspace", server.tools.project_root().string()}});
     std::string line;
     while (std::getline(std::cin, line)) {
         if (line.empty())

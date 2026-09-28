@@ -69,13 +69,18 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $package = "arn-windows-x64"
-          New-Item -ItemType Directory -Force $package | Out-Null
-          Copy-Item "build\Release\arn.exe" "$package\arn.exe"
-          Copy-Item "C:\vcpkg\installed\x64-windows\bin\libssl-3-x64.dll" $package
-          Copy-Item "C:\vcpkg\installed\x64-windows\bin\libcrypto-3-x64.dll" $package
-          Copy-Item "LICENSE", "README.md" $package
-          Compress-Archive -Path "$package\*" -DestinationPath "arn-windows-x64.zip" -Force
+          ./scripts/package-windows.ps1 `
+            -BuildDir build/Release `
+            -OutputDir arn-windows-x64 `
+            -ArchivePath arn-windows-x64.zip
+          $smoke = Join-Path $env:RUNNER_TEMP 'arn-cli-package-smoke'
+          Expand-Archive arn-windows-x64.zip $smoke
+          $oldPath = $env:PATH
+          try {
+            $env:PATH = Join-Path $env:SystemRoot 'System32'
+            & "$smoke/arn.exe" --version
+            if ($LASTEXITCODE -ne 0) { throw 'Packaged ARN failed outside the build tree.' }
+          } finally { $env:PATH = $oldPath }
 
       - name: Package Unix
         if: runner.os != 'Windows'

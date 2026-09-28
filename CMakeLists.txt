@@ -72,6 +72,7 @@ endif()
 add_executable(arn
     src/main.cpp
     src/model_provider.cpp
+    src/normal_chat.cpp
     src/api_client.cpp
     src/agent_workflow.cpp
     src/cli_support.cpp
@@ -127,6 +128,14 @@ if (BUILD_TESTING)
             TIMEOUT 30
             ENVIRONMENT "TEMP=${_arn_code_test_temp};TMP=${_arn_code_test_temp}")
     endif()
+    if (WIN32)
+        find_program(ARN_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
+        add_test(NAME windows_install
+            COMMAND ${ARN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_windows_test.ps1
+                    -BuildDir $<TARGET_FILE_DIR:arn>)
+        set_tests_properties(windows_install PROPERTIES TIMEOUT 45)
+    endif()
     add_executable(architecture_test tests/architecture_test.cpp)
     if (TARGET arn_core)
         get_target_property(ARN_CORE_SOURCE_DIR_PROP arn_core SOURCE_DIR)
@@ -151,6 +160,10 @@ if (BUILD_TESTING)
     add_executable(cli_support_test tests/cli_support_test.cpp src/cli_support.cpp)
     target_include_directories(cli_support_test PRIVATE include)
     add_test(NAME cli_support COMMAND cli_support_test)
+    add_executable(normal_chat_test tests/normal_chat_test.cpp src/normal_chat.cpp)
+    target_include_directories(normal_chat_test PRIVATE include)
+    target_link_libraries(normal_chat_test PRIVATE arn::core)
+    add_test(NAME normal_chat COMMAND normal_chat_test)
 
     if (MSVC)
         target_compile_options(confirmation_test PRIVATE /utf-8)
@@ -158,6 +171,7 @@ if (BUILD_TESTING)
         target_compile_options(architecture_test PRIVATE /utf-8)
         target_compile_options(agent_workflow_test PRIVATE /utf-8)
         target_compile_options(cli_support_test PRIVATE /utf-8)
+        target_compile_options(normal_chat_test PRIVATE /utf-8)
     endif()
 endif()
 
@@ -167,7 +181,7 @@ if (WIN32)
         list(APPEND _arn_code_runtime_targets
             model_list_test model_provider_test confirmation_test
             arn_server_fixture architecture_test agent_workflow_test)
-        list(APPEND _arn_code_runtime_targets cli_support_test)
+        list(APPEND _arn_code_runtime_targets cli_support_test normal_chat_test)
     endif()
     set(ARN_CODE_RUNTIME_EXECUTABLES "")
     set(ARN_CODE_RUNTIME_DIRS "$<TARGET_FILE_DIR:arn>")
