@@ -27,20 +27,39 @@ using AgentOutputSink = std::function<void(AgentOutputLevel level, std::string t
 struct AgentCommandCallbacks {
     AgentOutputSink output;
     ::arn::core::StreamCallbacks runtime;
+    std::function<::arn::core::ContinuationDecision(
+        const ::arn::core::ContextArtifact& plan)> decide_plan;
 };
 
-enum class AgentCommandStatus { usage, completed, failed, cancelled, needs_input, needs_confirmation };
+enum class AgentCommandMode { workflow, automatic_workflow, direct, invalid };
+
+struct ParsedAgentCommand {
+    AgentCommandMode mode{AgentCommandMode::invalid};
+    std::string profile_id;
+    std::string task;
+};
+
+enum class AgentCommandStatus {
+    usage,
+    completed,
+    failed,
+    cancelled,
+    declined,
+    needs_input,
+    needs_confirmation
+};
 
 struct AgentCommandResult {
     AgentCommandStatus status{AgentCommandStatus::failed};
     std::optional<::arn::core::OrchestrationResult> workflow;
+    std::optional<::arn::core::AgentResult> direct;
 };
 
-/** Parses the user-facing `/agent <task>` command.
- * Returns nullopt for normal chat and other commands; an engaged empty string
- * represents `/agent` without a task so the caller can print usage.
+/** Parses workflow, automatic workflow and exact standard-agent subcommands.
+ * Returns nullopt for normal chat and other commands. Invalid/missing agent
+ * arguments return an engaged command with mode == invalid.
  */
-[[nodiscard]] std::optional<std::string>
+[[nodiscard]] std::optional<ParsedAgentCommand>
 parse_agent_command(std::string_view input);
 
 /** Builds the standard registry and a fresh-provider AgentRuntime factory.
@@ -51,11 +70,11 @@ parse_agent_command(std::string_view input);
 [[nodiscard]] std::unique_ptr<::arn::core::AgentOrchestrator>
 create_agent_orchestrator(AgentWorkflowConfig config);
 
-/** Runs the `/agent` command body through an existing orchestrator.
- * Empty task text emits usage and does not execute a workflow.
+/** Runs a parsed `/agent` command through the registry/runtime-backed executor.
+ * Invalid input emits usage and performs no provider or tool work.
  */
 [[nodiscard]] AgentCommandResult
-run_agent_command(std::string task,
+run_agent_command(const ParsedAgentCommand& command,
                   const std::filesystem::path& project_root,
                   ::arn::core::AgentOrchestrator& orchestrator,
                   const AgentCommandCallbacks& callbacks = {},

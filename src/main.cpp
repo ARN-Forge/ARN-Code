@@ -366,7 +366,7 @@ int run() {
         else if (command == "/status") ui.add(Tone::normal, "Provider: " + arn::provider_name(provider) + " | Model: " + (model.empty() ? "not selected" : model) + " | API key: " + (key.empty() ? "not set" : "set") + " | Context: " + (session.session_entries() ? "active" : "empty"));
         else if (command == "/clear-session") { session.reset_session(); ui.add(Tone::good, "Chat context cleared. Key and model are unchanged."); }
         else if (command == "/models") { if (models.empty()) ui.add(Tone::warning, "No verified API key is active."); else for (const auto& name : models) ui.add(Tone::normal, "• " + name); }
-        else if (const auto agent_task = arn::parse_agent_command(input); agent_task) {
+        else if (const auto agent_command = arn::parse_agent_command(input); agent_command) {
             auto workflow = arn::create_agent_orchestrator({
                 .provider = provider,
                 .api_key = key,
@@ -375,7 +375,7 @@ int run() {
             });
             std::atomic_bool cancelled = false;
             arn::TerminalCancellationMonitor watcher(
-                cancelled, [&workflow] { workflow->cancel_active_workflow(); });
+                cancelled, [&workflow] { workflow->cancel_active_execution(); });
             const auto confirm = [&](const arn::core::ConfirmationRequest& request) {
                 watcher.pause_input();
                 ui.status("Allow file change? " + request.summary + " [y/N]");
@@ -383,6 +383,11 @@ int run() {
                 const int answer = terminal.read_confirmation();
                 ui.status("Type /help for commands · F2 copy mode");
                 watcher.resume_input();
+                if (cancelled.load() || answer == 3 || answer == 27) {
+                    cancelled.store(true);
+                    workflow->cancel_active_execution();
+                    return false;
+                }
                 return answer == 'y' || answer == 'Y';
             };
             const auto output = [&](arn::AgentOutputLevel level, std::string text) {
@@ -393,10 +398,28 @@ int run() {
                 ui.add(tone, std::move(text));
                 refresh();
             };
-            ui.status("Multi-agent workflow running… Esc or Ctrl+C cancels");
+            const auto decide_plan = [&](const arn::core::ContextArtifact&) {
+                watcher.pause_input();
+                ui.status("Proceed with Coder? [y/N]");
+                refresh();
+                const int answer = terminal.read_confirmation();
+                ui.status("Type /help for commands · F2 copy mode");
+                watcher.resume_input();
+                if (cancelled.load() || answer == 3 || answer == 27) {
+                    cancelled.store(true);
+                    workflow->cancel_active_execution();
+                    return arn::core::ContinuationDecision::cancel;
+                }
+                return answer == 'y' || answer == 'Y'
+                    ? arn::core::ContinuationDecision::proceed
+                    : arn::core::ContinuationDecision::decline;
+            };
+            ui.status(agent_command->mode == arn::AgentCommandMode::direct
+                          ? "Direct agent running… Esc or Ctrl+C cancels"
+                          : "Multi-agent workflow running… Esc or Ctrl+C cancels");
             refresh();
-            (void)arn::run_agent_command(*agent_task, tools.project_root(), *workflow,
-                                         {.output = output}, confirm);
+            (void)arn::run_agent_command(*agent_command, tools.project_root(), *workflow,
+                                         {.output = output, .decide_plan = decide_plan}, confirm);
         } else if (command == "/provider") {
             const auto selected = arn::provider_from_name(lower_ascii(argument));
             if (selected == arn::Provider::none) ui.add(Tone::warning, "Supported providers: gemini, deepseek, openrouter");

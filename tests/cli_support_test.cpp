@@ -59,8 +59,17 @@ void key_commands_are_safe_to_echo() {
 
 void help_is_line_based() {
     const auto lines = arn::help_lines();
-    check(std::ranges::find(lines, "  /agent <task>              Run multi-agent workflow") !=
-              lines.end(), "Agent command is documented");
+    for (const std::string expected : {
+             "  /agent <task>              Run workflow with plan approval",
+             "  /agent --auto <task>       Run workflow without plan approval",
+             "  /agent explorer <task>     Run Explorer only (read-only)",
+             "  /agent planner <task>      Run Planner only (read-only)",
+             "  /agent coder <task>        Run Coder only (changes need approval)",
+             "  /agent reviewer <task>     Run Reviewer only (read-only)",
+         }) {
+        check(std::ranges::find(lines, expected) != lines.end(),
+              "Every agent command is documented on its own line");
+    }
     check(std::ranges::find(lines, "  /key-gemini                Set Gemini API key securely") !=
               lines.end(), "Secure key command is documented");
     check(std::ranges::none_of(lines, [](const std::string& line) {

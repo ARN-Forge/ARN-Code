@@ -166,6 +166,14 @@ TerminalEvent TerminalSession::read_event() {
 
 int TerminalSession::read_confirmation() {
     for (;;) {
+        if (auto* flag = active_cancel_flag.load(std::memory_order_acquire);
+            flag && flag->load(std::memory_order_relaxed)) {
+            return 3;
+        }
+        if (!_kbhit()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
         const int value = _getch();
         if (value == 0 || value == 0xE0) {
             (void)_getch();

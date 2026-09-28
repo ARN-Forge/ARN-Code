@@ -191,6 +191,8 @@ int TerminalSession::read_confirmation() {
         if (event.type == TerminalEventType::enter || event.type == TerminalEventType::end_of_input) {
             return '\n';
         }
+        if (event.type == TerminalEventType::escape) return 27;
+        if (event.type == TerminalEventType::interrupt) return 3;
     }
 }
 
