@@ -31,11 +31,11 @@ find_package(Threads REQUIRED)
 
 include(CTest)
 
-# ARN Core dependency (v0.1.0)
+# ARN Core dependency
 # Supports:
 # 1. Local development: checks ARN_CORE_SOURCE_DIR or adjacent ../arn-core repository
 # 2. Installed package: find_package(arn_core 0.1.0 CONFIG QUIET)
-# 3. Remote/CI fallback: FetchContent from https://github.com/ARN-Forge/arn-core.git @ v0.1.0
+# 3. Remote/CI fallback: FetchContent from a tested arn-core revision
 
 set(ARN_CORE_SOURCE_DIR "" CACHE PATH "Path to standalone arn-core repository")
 
@@ -51,12 +51,12 @@ else()
     if (arn_core_FOUND)
         message(STATUS "Found installed arn_core: ${arn_core_DIR}")
     else()
-        message(STATUS "Fetching arn_core v0.1.0 from https://github.com/ARN-Forge/arn-core.git")
+        set(ARN_CORE_GIT_REVISION "05f048d5abd83928a6b05ec7c5131d3032ea8a26")
+        message(STATUS "Fetching arn_core ${ARN_CORE_GIT_REVISION} from https://github.com/ARN-Forge/arn-core.git")
         FetchContent_Declare(
             arn_core
             GIT_REPOSITORY https://github.com/ARN-Forge/arn-core.git
-            GIT_TAG v0.1.0
-            GIT_SHALLOW TRUE
+            GIT_TAG ${ARN_CORE_GIT_REVISION}
         )
         FetchContent_MakeAvailable(arn_core)
     endif()
