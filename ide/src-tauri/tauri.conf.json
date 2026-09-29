@@ -1,6 +1,6 @@
 {
   "productName": "ARN IDE",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "identifier": "com.arnecto.ide",
   "build": {
     "beforeDevCommand": "npm run dev",
