@@ -200,10 +200,15 @@ struct Server {
 } // namespace
 
 int run_server() {
+    // Report the invoking project's working directory verbatim. The tool
+    // registry uses a canonicalised path internally for filesystem safety,
+    // but the ready message must match the directory the host actually
+    // launched us from so callers can verify workspace integrity.
+    const auto launched_from = std::filesystem::current_path();
     Server server;
     emit({{"type", "ready"},
           {"protocol", 2},
-          {"workspace", server.tools.project_root().string()}});
+          {"workspace", launched_from.string()}});
     std::string line;
     while (std::getline(std::cin, line)) {
         if (line.empty())
