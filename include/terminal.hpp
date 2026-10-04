@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace arn {
 
@@ -45,7 +46,9 @@ public:
 
     [[nodiscard]] TerminalSize size() const;
     [[nodiscard]] TerminalEvent read_event();
-    [[nodiscard]] int read_confirmation();
+    [[nodiscard]] int read_confirmation(
+        const std::function<void(std::string_view)>& display = {});
+    [[nodiscard]] bool native_scrollback() const noexcept;
 
     void set_copy_mode(bool enabled);
     [[nodiscard]] bool copy_mode() const noexcept;

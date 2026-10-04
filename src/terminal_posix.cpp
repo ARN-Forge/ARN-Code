@@ -1,4 +1,5 @@
 #include "terminal.hpp"
+#include "confirmation_input.hpp"
 
 #include <cerrno>
 #include <csignal>
@@ -182,19 +183,11 @@ TerminalEvent TerminalSession::read_event() {
     }
 }
 
-int TerminalSession::read_confirmation() {
-    for (;;) {
-        const auto event = read_event();
-        if (event.type == TerminalEventType::character && !event.text.empty()) {
-            return static_cast<unsigned char>(event.text.front());
-        }
-        if (event.type == TerminalEventType::enter || event.type == TerminalEventType::end_of_input) {
-            return '\n';
-        }
-        if (event.type == TerminalEventType::escape) return 27;
-        if (event.type == TerminalEventType::interrupt) return 3;
-    }
+int TerminalSession::read_confirmation(const std::function<void(std::string_view)>& display) {
+    return edit_confirmation([this] { return read_event(); }, display);
 }
+
+bool TerminalSession::native_scrollback() const noexcept { return false; }
 
 void TerminalSession::set_copy_mode(bool enabled) {
     if (impl_->copy_mode == enabled) return;
