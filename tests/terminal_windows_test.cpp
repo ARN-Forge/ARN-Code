@@ -248,6 +248,26 @@ int main(int argc, char** argv) {
             confirmation(terminal, {key(VK_ESCAPE, 27)}, 27, {""});
             confirmation(terminal, {key('C', 3, true, LEFT_CTRL_PRESSED)}, 3, {""});
 
+            // ACP EOF/shutdown cancels a pending decision without requiring a
+            // new console event. A typed y without Enter must not grant access.
+            {
+                std::atomic_bool stopped{false};
+                std::jthread transport_stop([&] {
+                    std::this_thread::sleep_for(30ms);
+                    stopped.store(true);
+                });
+                std::vector<std::string> displayed;
+                const auto start = std::chrono::steady_clock::now();
+                const int answer = terminal.read_confirmation([&](std::string_view choice) {
+                    displayed.emplace_back(choice);
+                    if (displayed.size() == 1) write({key('Y', L'y')});
+                }, &stopped);
+                check(answer == 3 && displayed == std::vector<std::string>{"", "y"},
+                      "Transport cancellation accepted an unfinished confirmation");
+                check(std::chrono::steady_clock::now() - start < 250ms,
+                      "Transport cancellation did not wake console input");
+            }
+
             arn::SecretInputBuffer secret;
             write({key('X', L'X'), key('X', L'X'), key(VK_BACK, 8), key(VK_RETURN, 0)});
             while (secret.state() == arn::SecretInputState::editing) secret.consume(terminal.read_event());

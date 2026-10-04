@@ -46,8 +46,12 @@ public:
 
     [[nodiscard]] TerminalSize size() const;
     [[nodiscard]] TerminalEvent read_event();
+    [[nodiscard]] TerminalEvent read_event(const std::atomic_bool* cancelled);
     [[nodiscard]] int read_confirmation(
         const std::function<void(std::string_view)>& display = {});
+    [[nodiscard]] int read_confirmation(
+        const std::function<void(std::string_view)>& display,
+        const std::atomic_bool* cancelled);
     [[nodiscard]] bool native_scrollback() const noexcept;
 
     void set_copy_mode(bool enabled);

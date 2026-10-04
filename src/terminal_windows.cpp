@@ -118,13 +118,17 @@ TerminalSize TerminalSession::size() const {
     return {};
 }
 
-TerminalEvent TerminalSession::read_event() {
+TerminalEvent TerminalSession::read_event() { return read_event(nullptr); }
+
+TerminalEvent TerminalSession::read_event(const std::atomic_bool* cancelled) {
     for (;;) {
+        if (cancelled && cancelled->load()) return {TerminalEventType::interrupt, {}};
         if (interrupt_pending.exchange(false)) return {TerminalEventType::interrupt, {}};
         if (impl_->input == INVALID_HANDLE_VALUE || !interrupt_event)
             return {TerminalEventType::end_of_input, {}};
         const HANDLE handles[]{impl_->input, interrupt_event};
-        const DWORD ready = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+        const DWORD ready = WaitForMultipleObjects(2, handles, FALSE, cancelled ? 25 : INFINITE);
+        if (ready == WAIT_TIMEOUT) continue;
         if (ready == WAIT_OBJECT_0 + 1) continue;
         if (ready != WAIT_OBJECT_0) return {TerminalEventType::end_of_input, {}};
         INPUT_RECORD event{};
@@ -179,15 +183,20 @@ TerminalEvent TerminalSession::read_event() {
 }
 
 int TerminalSession::read_confirmation(const std::function<void(std::string_view)>& display) {
+    return read_confirmation(display, nullptr);
+}
+
+int TerminalSession::read_confirmation(const std::function<void(std::string_view)>& display,
+                                       const std::atomic_bool* cancelled) {
     if (impl_->input != INVALID_HANDLE_VALUE) {
         FlushConsoleInputBuffer(impl_->input);
     }
-    const int answer = edit_confirmation([this] {
+    const int answer = edit_confirmation([this, cancelled] {
         if (auto* flag = active_cancel_flag.load(std::memory_order_acquire);
             flag && flag->load(std::memory_order_relaxed)) {
             return TerminalEvent{TerminalEventType::interrupt, {}};
         }
-        return read_event();
+        return read_event(cancelled);
     }, display);
     // Type-ahead from this decision must not become the next decision.
     if (impl_->input != INVALID_HANDLE_VALUE) FlushConsoleInputBuffer(impl_->input);

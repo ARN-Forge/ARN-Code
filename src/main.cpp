@@ -1,3 +1,5 @@
+#include "acp/acp_session.hpp"
+#include "acp/kiro_adapter.hpp"
 #include "agent/coding_prompt.hpp"
 #include "agent_workflow.hpp"
 #include "cli_support.hpp"
@@ -39,7 +41,7 @@ std::string remove_quotes(std::string text) {
 using arn::terminal_ui::Tone;
 using arn::terminal_ui::Ui;
 
-constexpr std::array command_hints{"/agent", "/key-gemini", "/key-deepseek", "/key-openrouter", "/key-omniroute", "/model", "/models", "/provider", "/status", "/clear-session", "/clear", "/help", "/exit"};
+constexpr std::array command_hints{"/acp", "/agent", "/key-gemini", "/key-deepseek", "/key-openrouter", "/key-omniroute", "/model", "/models", "/provider", "/status", "/clear-session", "/clear", "/help", "/exit"};
 
 std::string input_hint(std::string_view input) {
     if (!input.starts_with('/') || input.find_first_of(" \t") != std::string_view::npos) {
@@ -155,12 +157,51 @@ int run() {
     arn::Provider provider = arn::Provider::none;
     std::string key, model;
     std::vector<std::string> models;
+    arn::acp::AcpSession acp_session;
     bool context_active = false;
     // Never query AgentSession from a streaming or confirmation callback:
     // prompt() owns the session mutex until the request finishes.
     const auto refresh = [&] {
-        ui.session(arn::provider_name(provider), model, context_active);
+        if (acp_session.active()) {
+            const std::string display_model = model.empty() ? "auto" : model;
+            ui.session("kiro", display_model, context_active);
+        } else {
+            ui.session(arn::provider_name(provider), model, context_active);
+        }
         ui.render();
+    };
+
+    const auto activate_kiro = [&]() {
+        const auto availability = arn::acp::probe_kiro_cli();
+        if (availability.status == arn::acp::KiroStatus::not_installed) {
+            ui.add(Tone::warning, availability.detail);
+        } else if (availability.status == arn::acp::KiroStatus::not_authenticated) {
+            ui.add(Tone::warning, availability.detail);
+        } else {
+            arn::acp::AcpBackendInfo info;
+            info.kind = arn::acp::AcpBackendKind::kiro;
+            info.label = "Kiro via " + arn::acp::KiroAdapter::agent_label();
+            info.binary_path = availability.resolved_path;
+            const auto error = acp_session.activate(info);
+            if (!error.empty()) {
+                ui.add(Tone::warning, error);
+            } else {
+                provider = arn::Provider::none;
+                key.clear();
+                model.clear();
+                models.clear();
+                session.reset_session();
+                context_active = false;
+                ui.add(Tone::good, "ACP agent ready: " + info.label);
+                if (!acp_session.available_models().empty()) {
+                    ui.add(Tone::normal, "Discovered " +
+                        std::to_string(acp_session.available_models().size()) +
+                        " model(s). Use /model <id> to switch.");
+                } else {
+                    ui.add(Tone::muted, "Kiro did not expose models through `kiro-cli chat --list-models`.");
+                }
+            }
+        }
     };
     refresh();
     for (;;) {
@@ -191,6 +232,45 @@ int run() {
                 return answer == 'y' || answer == 'Y';
             };
 
+            if (acp_session.active()) {
+                // Route through the active ACP backend. ARN's native tool
+                // registry is intentionally bypassed: the ACP agent performs
+                // its own tool activity. Permission requests from the agent
+                // are surfaced through the existing y/N confirmation UX.
+                const auto gate = [&](const arn::acp::AcpPermissionRequest& request,
+                                      const std::atomic_bool& stopped) -> std::string {
+                    watcher.pause_input();
+                    const auto summary = request.description.empty()
+                        ? "Allow this tool call?" : "ACP tool: " + request.description;
+                    ui.status(summary + " [y/N]");
+                    const int answer = terminal.read_confirmation(
+                        [&](std::string_view choice) { ui.show_confirmation(choice); }, &stopped);
+                    ui.finish_confirmation(answer);
+                    if ((answer == 3 || answer == 27) && !stopped.load()) cancelled.store(true);
+                    ui.status("Arnie is working… Esc or Ctrl+C cancels");
+                    watcher.resume_input();
+                    if (cancelled.load() || stopped.load()) return {};
+                    return arn::acp::confirmation_option_id(request, answer == 'y' || answer == 'Y');
+                };
+                const auto chat = acp_session.chat(
+                    input,
+                    [&](std::string_view text) { ui.append(text); refresh(); },
+                    [&](const std::string& title) {
+                        ui.add(Tone::muted, "• " + title);
+                        refresh();
+                    },
+                    gate,
+                    &cancelled);
+                if (chat.cancelled) ui.add(Tone::warning, "Request cancelled.");
+                else if (!chat.ok && !chat.message.empty()) ui.add(Tone::error, "Error: " + chat.message);
+                else if (chat.ok) {
+                    context_active = true;
+                    if (chat.message.empty()) ui.add(Tone::muted, "Done.");
+                }
+                watcher.pause_input();
+                ui.status(ui.ready_status()); refresh(); continue;
+            }
+
             session.set_confirmation_handler(confirm);
             const auto chat = arn::run_normal_chat(
                 session, input,
@@ -213,7 +293,10 @@ int run() {
             for (const auto& line : arn::help_lines()) ui.add(Tone::muted, line);
         }
         else if (command == "/status") {
-            if (provider == arn::Provider::omniroute) {
+            if (acp_session.active()) {
+                const std::string display_model = model.empty() ? "auto" : model;
+                ui.add(Tone::normal, "Provider: kiro | Model: " + display_model + " | Auth: kiro-cli | Context: " + (context_active ? "active" : "empty"));
+            } else if (provider == arn::Provider::omniroute) {
                 const auto* active = session.provider();
                 auto configured = active && active->kind() == provider && !key.empty()
                     ? std::unique_ptr<arn::IModelProvider>{} : arn::make_provider(provider);
@@ -225,7 +308,19 @@ int run() {
             }
         }
         else if (command == "/clear-session") { session.reset_session(); context_active = false; ui.add(Tone::good, "Chat context cleared. Key and model are unchanged."); }
-        else if (command == "/models") { if (models.empty()) ui.add(Tone::warning, "No verified API key is active."); else for (const auto& name : models) ui.add(Tone::normal, "• " + name); }
+        else if (command == "/models") {
+            if (acp_session.active()) {
+                if (acp_session.available_models().empty()) {
+                    ui.add(Tone::normal, "Kiro manages model selection through kiro-cli; model discovery is unavailable.");
+                } else {
+                    for (const auto& name : acp_session.available_models()) ui.add(Tone::normal, "• " + name);
+                }
+            } else if (models.empty()) {
+                ui.add(Tone::warning, "No verified API key is active.");
+            } else {
+                for (const auto& name : models) ui.add(Tone::normal, "• " + name);
+            }
+        }
         else if (const auto agent_command = arn::parse_agent_command(input); agent_command) {
             auto workflow = arn::create_agent_orchestrator({
                 .provider = provider,
@@ -280,9 +375,26 @@ int run() {
                                          {.output = output, .decide_plan = decide_plan}, confirm);
             watcher.pause_input();
         } else if (command == "/provider") {
-            const auto selected = arn::provider_from_name(lower_ascii(argument));
-            if (selected == arn::Provider::none) ui.add(Tone::warning, "Supported providers: gemini, deepseek, openrouter, omniroute");
-            else { provider = selected; key.clear(); model.clear(); models.clear(); session.reset_session(); context_active = false; ui.add(Tone::good, "Active provider: " + arn::provider_name(provider)); }
+            const auto arg = lower_ascii(argument);
+            if (arg == "kiro") {
+                activate_kiro();
+            } else {
+                const auto selected = arn::provider_from_name(arg);
+                if (selected == arn::Provider::none) {
+                    ui.add(Tone::warning, "Supported providers: gemini, deepseek, openrouter, omniroute, kiro");
+                } else {
+                    if (acp_session.active()) {
+                        acp_session.deactivate();
+                    }
+                    provider = selected;
+                    key.clear();
+                    model.clear();
+                    models.clear();
+                    session.reset_session();
+                    context_active = false;
+                    ui.add(Tone::good, "Active provider: " + arn::provider_name(provider));
+                }
+            }
         } else if (key_command) {
             const auto selected = [&] {
                 switch (key_command->command) {
@@ -316,6 +428,9 @@ int run() {
                 if (!result.ok || session.available_models().empty()) {
                     ui.add(Tone::error, "Key was not saved: " + (result.ok ? "no text-generation models are available." : result.message));
                 } else {
+                    if (acp_session.active()) {
+                        acp_session.deactivate();
+                    }
                     provider = selected;
                     key = *candidate;
                     models = session.available_models();
@@ -328,8 +443,54 @@ int run() {
             }
         } else if (command == "/model") {
             const auto selected = remove_quotes(argument);
-            if (std::ranges::find(models, selected) == models.end()) ui.add(Tone::warning, "That model is not in the active provider list. Use /models.");
-            else { model = selected; session.select_model(model); session.reset_session(); context_active = false; ui.add(Tone::good, "Active model: " + model); }
+            if (acp_session.active()) {
+                std::string error;
+                if (!acp_session.set_model(selected, error)) {
+                    ui.add(Tone::warning, "Could not switch ACP model: " + error);
+                } else {
+                    model = selected;
+                    session.reset_session();
+                    context_active = false;
+                    ui.add(Tone::good, "Active ACP model: " + model);
+                }
+            } else if (std::ranges::find(models, selected) == models.end()) {
+                ui.add(Tone::warning, "That model is not in the active provider list. Use /models.");
+            } else {
+                model = selected; session.select_model(model); session.reset_session(); context_active = false; ui.add(Tone::good, "Active model: " + model);
+            }
+        } else if (command == "/acp") {
+            // /acp [kiro|off]
+            const auto arg = lower_ascii(argument);
+            if (arg.empty()) {
+                if (acp_session.active()) {
+                    ui.add(Tone::good, "Active ACP agent: " + acp_session.backend().label
+                        + " (" + acp_session.backend().binary_path + ")");
+                    if (!acp_session.available_models().empty()) {
+                        ui.add(Tone::normal, "Discovered " +
+                            std::to_string(acp_session.available_models().size()) +
+                            " model(s). Use /model <id> to switch.");
+                    } else {
+                        ui.add(Tone::normal, "No models discovered yet for this backend.");
+                    }
+                } else {
+                    ui.add(Tone::normal, "No ACP agent active. Available: /acp kiro, /acp off.");
+                    ui.add(Tone::muted, "ACP agents use their own external tool sandbox; "
+                        "ARN's confirmation flow still wraps their permission requests.");
+                }
+            } else if (arg == "off" || arg == "none") {
+                if (!acp_session.active()) {
+                    ui.add(Tone::muted, "No ACP agent active.");
+                } else {
+                    acp_session.deactivate();
+                    session.reset_session();
+                    context_active = false;
+                    ui.add(Tone::good, "ACP agent deactivated. Back to native providers.");
+                }
+            } else if (arg == "kiro") {
+                activate_kiro();
+            } else {
+                ui.add(Tone::warning, "Unknown ACP agent. Available: kiro, off.");
+            }
         } else ui.add(Tone::error, "Unknown command. Type /help for commands.");
         ui.status(ui.ready_status()); refresh();
     }

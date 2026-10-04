@@ -146,9 +146,12 @@ TerminalSize TerminalSession::size() const {
     return {};
 }
 
-TerminalEvent TerminalSession::read_event() {
+TerminalEvent TerminalSession::read_event() { return read_event(nullptr); }
+
+TerminalEvent TerminalSession::read_event(const std::atomic_bool* cancelled) {
     using Type = TerminalEventType;
     for (;;) {
+        if (cancelled && cancelled->load()) return {TerminalEventType::interrupt, {}};
         if (resize_requested) {
             resize_requested = 0;
             return {Type::resize, {}};
@@ -157,7 +160,7 @@ TerminalEvent TerminalSession::read_event() {
             interrupt_requested = 0;
             return {Type::interrupt, {}};
         }
-        if (!wait_for_stdin(-1)) continue;
+        if (!wait_for_stdin(cancelled ? 25 : -1)) continue;
 
         unsigned char value{};
         if (!read_byte(value)) {
@@ -184,7 +187,12 @@ TerminalEvent TerminalSession::read_event() {
 }
 
 int TerminalSession::read_confirmation(const std::function<void(std::string_view)>& display) {
-    return edit_confirmation([this] { return read_event(); }, display);
+    return read_confirmation(display, nullptr);
+}
+
+int TerminalSession::read_confirmation(const std::function<void(std::string_view)>& display,
+                                       const std::atomic_bool* cancelled) {
+    return edit_confirmation([this, cancelled] { return read_event(cancelled); }, display);
 }
 
 bool TerminalSession::native_scrollback() const noexcept { return false; }

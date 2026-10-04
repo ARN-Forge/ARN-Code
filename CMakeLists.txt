@@ -34,6 +34,7 @@ FetchContent_MakeAvailable(nlohmann_json cpp_httplib)
 find_package(Threads REQUIRED)
 
 include(CTest)
+option(ARN_ENABLE_KIRO_INTEGRATION_TESTS "Run tests using an installed/authenticated Kiro CLI" OFF)
 
 # ARN Core dependency
 # Supports:
@@ -81,6 +82,10 @@ add_executable(arn
     src/agent_workflow.cpp
     src/cli_support.cpp
     src/config_manager.cpp
+    src/acp/acp_subprocess.cpp
+    src/acp/acp_client.cpp
+    src/acp/kiro_adapter.cpp
+    src/acp/acp_session.cpp
     src/tools/workspace_sandbox.cpp
     src/tools/coding_tools.cpp
     src/server.cpp
@@ -106,7 +111,57 @@ if (BUILD_TESTING)
     if (MSVC)
         target_compile_options(model_provider_test PRIVATE /utf-8)
     endif()
+    add_executable(acp_client_test
+        tests/acp_client_test.cpp
+        src/acp/acp_subprocess.cpp
+        src/acp/acp_client.cpp
+        src/acp/kiro_adapter.cpp
+        src/acp/acp_session.cpp)
+    find_program(ARN_TEST_NODE_EXECUTABLE NAMES node nodejs REQUIRED)
+    target_include_directories(acp_client_test PRIVATE include)
+    target_compile_definitions(acp_client_test PRIVATE
+        ARN_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
+        ARN_TEST_NODE="${ARN_TEST_NODE_EXECUTABLE}")
+    target_link_libraries(acp_client_test PRIVATE
+        arn::core nlohmann_json::nlohmann_json Threads::Threads)
+    if (MSVC)
+        target_compile_options(acp_client_test PRIVATE /utf-8)
+    endif()
+    add_test(NAME acp_client COMMAND acp_client_test)
+    set_tests_properties(acp_client PROPERTIES TIMEOUT 60)
+    add_executable(acp_session_test tests/acp_session_test.cpp
+        src/acp/acp_subprocess.cpp src/acp/acp_client.cpp
+        src/acp/kiro_adapter.cpp src/acp/acp_session.cpp)
+    target_include_directories(acp_session_test PRIVATE include)
+    target_compile_definitions(acp_session_test PRIVATE
+        ARN_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
+        ARN_TEST_NODE="${ARN_TEST_NODE_EXECUTABLE}")
+    target_link_libraries(acp_session_test PRIVATE
+        arn::core nlohmann_json::nlohmann_json Threads::Threads)
+    add_test(NAME acp_session COMMAND acp_session_test)
+    set_tests_properties(acp_session PROPERTIES TIMEOUT 60)
+    add_executable(acp_subprocess_test tests/acp_subprocess_test.cpp src/acp/acp_subprocess.cpp)
+    target_include_directories(acp_subprocess_test PRIVATE include)
+    target_link_libraries(acp_subprocess_test PRIVATE Threads::Threads)
+    add_test(NAME acp_subprocess COMMAND acp_subprocess_test)
+    set_tests_properties(acp_subprocess PROPERTIES TIMEOUT 30)
 
+    add_executable(acp_smoke_test
+        tests/acp_smoke_test.cpp
+        src/acp/acp_subprocess.cpp
+        src/acp/acp_client.cpp
+        src/acp/kiro_adapter.cpp
+        src/acp/acp_session.cpp)
+    target_include_directories(acp_smoke_test PRIVATE include)
+    target_link_libraries(acp_smoke_test PRIVATE
+        arn::core nlohmann_json::nlohmann_json Threads::Threads)
+    if (MSVC)
+        target_compile_options(acp_smoke_test PRIVATE /utf-8)
+    endif()
+    if (ARN_ENABLE_KIRO_INTEGRATION_TESTS)
+        add_test(NAME acp_smoke COMMAND acp_smoke_test)
+        set_tests_properties(acp_smoke PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77 LABELS integration)
+    endif()
 endif()
 
 if (BUILD_TESTING)
@@ -201,6 +256,7 @@ if (WIN32)
             model_list_test model_provider_test confirmation_test
             arn_server_fixture architecture_test agent_workflow_test)
         list(APPEND _arn_code_runtime_targets cli_support_test normal_chat_test)
+        list(APPEND _arn_code_runtime_targets acp_client_test acp_session_test acp_smoke_test)
     endif()
     set(ARN_CODE_RUNTIME_EXECUTABLES "")
     set(ARN_CODE_RUNTIME_DIRS "$<TARGET_FILE_DIR:arn>")
