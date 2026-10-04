@@ -32,6 +32,15 @@ void write(const std::vector<INPUT_RECORD>& events) {
           "WriteConsoleInputW failed");
 }
 
+arn::TerminalEvent editor_event(arn::TerminalSession& terminal) {
+    // AllocConsole/console mode changes can enqueue resize records. Like the
+    // real command editor, handle these independently from keyboard input.
+    for (;;) {
+        auto event = terminal.read_event();
+        if (event.type != T::resize) return event;
+    }
+}
+
 void confirmation(arn::TerminalSession& terminal, std::vector<INPUT_RECORD> events,
                   int expected, const std::vector<std::string>& expected_display) {
     // Pending records from a previous request must not decide this request.
@@ -232,13 +241,23 @@ int main(int argc, char** argv) {
             check(mode & ENABLE_PROCESSED_INPUT, "Selection-aware Ctrl+C must remain processed");
             check(terminal.native_scrollback() && !terminal.copy_mode(), "Native scrollback not active");
 
-            write({key('A', L'a', false), key('A', L'a'), key(0, L'П'),
+            check(FlushConsoleInputBuffer(console_input), "Could not clear console setup events");
+            INPUT_RECORD resize{};
+            resize.EventType = WINDOW_BUFFER_SIZE_EVENT;
+            resize.Event.WindowBufferSizeEvent.dwSize = {100, 30};
+            // Reproduce the event ordering that the old text-only assertion
+            // incorrectly treated as a key-up failure on a headless runner.
+            write({resize, key('Z', L'z', false), key('A', L'a'),
+                   key(VK_RETURN, L'\r', false), resize, key(0, L'П'),
                    key(VK_RETURN, 0)});
-            check(terminal.read_event().text == "a", "Key-up must not enter the editor");
-            check(terminal.read_event().text == "П", "Ukrainian UTF-16 was not converted");
-            check(terminal.read_event().type == T::enter, "VK_RETURN with empty UnicodeChar must submit");
+            const auto typed = editor_event(terminal);
+            check(typed.type == T::character && typed.text == "a", "Key-up must not enter the editor");
+            const auto ukrainian = editor_event(terminal);
+            check(ukrainian.type == T::character && ukrainian.text == "П",
+                  "Key-up Enter or resize displaced Ukrainian input");
+            check(editor_event(terminal).type == T::enter, "VK_RETURN with empty UnicodeChar must submit");
             write({key(0, L'\n')});
-            check(terminal.read_event().type == T::enter, "LF must submit");
+            check(editor_event(terminal).type == T::enter, "LF must submit");
 
             confirmation(terminal, {key('Y', L'y'), key(VK_RETURN, 0)}, 'y', {"", "y"});
             confirmation(terminal, {key('N', L'n'), key(VK_RETURN, L'\r')}, 'n', {"", "n"});

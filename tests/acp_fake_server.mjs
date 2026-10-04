@@ -93,6 +93,12 @@ async function handleLine(msg) {
     try {
       const result = await dispatch(msg.method, msg.params || {}, msg.id);
       if (result !== undefined) send({ jsonrpc: '2.0', id: msg.id, result });
+      // Test-only control RPC: acknowledge before breaking the transport. The
+      // session test sends this only after its permission callback has entered.
+      if (msg.method === 'session/set_model') {
+        if (msg.params?.modelId === '__FAKE_ACP_EXIT__') process.exit(2);
+        if (msg.params?.modelId === '__FAKE_ACP_EOF__') closeSync(1);
+      }
     } catch (e) {
       send({ jsonrpc: '2.0', id: msg.id,
         error: { code: e?.code ?? -32603, message: e?.message ?? String(e) } });
@@ -184,8 +190,6 @@ async function handlePromptCommand(cmd, sessionId) {
     case 'permission-eof':
     case 'permission-wrong-session':
     case 'permission-subject': {
-      if (cmd === 'permission-exit') setTimeout(() => process.exit(2), 80);
-      if (cmd === 'permission-eof') setTimeout(() => closeSync(1), 80);
       const ask = () => permission(
         cmd === 'permission-wrong-session' ? 'wrong-session' : sessionId,
         cmd !== 'permission-then-finish', cmd === 'permission-subject');

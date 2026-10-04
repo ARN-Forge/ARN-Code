@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <future>
 #include <deque>
 #include <mutex>
@@ -191,8 +192,19 @@ AcpChatResult AcpSession::chat(std::string_view prompt,
     std::atomic_bool was_cancelled{false};
     // A gate may be waiting for keyboard input. Transport completion and EOF
     // must wake it too, without making the reader thread own terminal input.
-    std::jthread monitor([&](std::stop_token stop) {
-        while (!stop.stop_requested()) {
+    std::mutex monitor_mutex;
+    std::condition_variable monitor_changed;
+    bool monitor_stopped = false;
+    std::thread monitor([&] {
+        for (;;) {
+            {
+                std::unique_lock lock(monitor_mutex);
+                // The public cancellation flag has no notification channel.
+                // Bound its observation latency without spinning; local cleanup
+                // notifies this wait immediately, including exceptional exits.
+                if (monitor_changed.wait_for(lock, std::chrono::milliseconds(10),
+                                             [&] { return monitor_stopped; })) return;
+            }
             if ((cancelled && cancelled->load()) || abort_requested->load()) {
                 was_cancelled.store(true);
                 stopped->store(true);
@@ -202,12 +214,21 @@ AcpChatResult AcpSession::chat(std::string_view prompt,
                 return;
             }
             if (!client->running() ||
-                future.wait_for(std::chrono::milliseconds(10)) == std::future_status::ready) {
+                future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
                 stopped->store(true);
                 return;
             }
         }
     });
+    const auto join_monitor = [&](void*) {
+        {
+            std::lock_guard lock(monitor_mutex);
+            monitor_stopped = true;
+        }
+        monitor_changed.notify_all();
+        monitor.join();
+    };
+    std::unique_ptr<void, decltype(join_monitor)> monitor_guard(&monitor, join_monitor);
     // Serialize rendering and confirmation on the caller's thread. The reader
     // can continue consuming EOF, cancellation and other permission requests.
     for (;;) {
@@ -241,8 +262,7 @@ AcpChatResult AcpSession::chat(std::string_view prompt,
         client->request_permission(state.session_id, request, selection);
     }
     const auto response = future.get();
-    monitor.request_stop();
-    monitor.join();
+    monitor_guard.reset();
     stopped->store(true);
     // prompt() has cancelled any remaining request IDs before returning.
     if (abort_requested->load() || was_cancelled.load() || (cancelled && cancelled->load())) {

@@ -153,10 +153,17 @@ void pending_cleanup(const std::string& command, bool shutdown) {
                 return confirmation_option_id(request, true);
             }, &cancel);
     });
+    // This promise is the ordering barrier, not a sleep racing an 80 ms server
+    // exit. The deadline only bounds a broken test; EOF/exit happens afterward.
     check(ready.wait_for(3s) == std::future_status::ready, "Pending permission gate not entered");
     if (command == "permission-pending") {
         if (shutdown) session.deactivate();
         else cancel.store(true);
+    } else {
+        std::string error;
+        check(session.set_model(command == "permission-exit" ? "__FAKE_ACP_EXIT__"
+                                                             : "__FAKE_ACP_EOF__", error),
+              "Fake transport control RPC failed");
     }
     check(chat.wait_for(5s) == std::future_status::ready, "Cleanup left chat unresolved");
     const auto result = chat.get();
