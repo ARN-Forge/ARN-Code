@@ -57,6 +57,7 @@ void key_commands_are_safe_to_echo() {
         {"/key-gemini", arn::ApiKeyCommand::gemini},
         {"/key-deepseek", arn::ApiKeyCommand::deepseek},
         {"/key-openrouter", arn::ApiKeyCommand::openrouter},
+        {"/key-omniroute", arn::ApiKeyCommand::omniroute},
     };
     for (const auto& [command, kind] : commands) {
         const auto exact = arn::parse_api_key_command(command);
@@ -94,6 +95,8 @@ void help_is_line_based() {
     }
     check(std::ranges::find(lines, "  /key-gemini                Set Gemini API key securely") !=
               lines.end(), "Secure key command is documented");
+    check(std::ranges::find(lines, "  /key-omniroute             Set OmniRoute API key securely") !=
+              lines.end(), "OmniRoute secure key command is documented");
     check(std::ranges::none_of(lines, [](const std::string& line) {
               return line.find("/agent <task>, /key-gemini") != std::string::npos;
           }), "Help does not contain the old comma-separated command list");
@@ -104,7 +107,7 @@ void help_is_line_based() {
 int main() {
     // Real-terminal trace: Tab completed /key to /key-gemini + space;
     // 53 printable bytes reached the editor before Enter (65 total bytes).
-    for (const std::string command : {"/key-gemini", "/key-deepseek", "/key-openrouter"}) {
+    for (const std::string command : {"/key-gemini", "/key-deepseek", "/key-openrouter", "/key-omniroute"}) {
         std::string buffer = command + " ";
         check(arn::safe_command_display(buffer) == command,
               "Completion whitespace is not an inline value");

@@ -16,6 +16,7 @@
 #include <arn/core/provider/gemini_provider.hpp>
 #include <arn/core/provider/model_provider.hpp>
 #include <arn/core/provider/openrouter_provider.hpp>
+#include <arn/core/provider/omniroute_provider.hpp>
 #include <arn/core/tool/tool.hpp>
 #include <arn/core/tool/tool_registry.hpp>
 #include <arn/core/version.hpp>

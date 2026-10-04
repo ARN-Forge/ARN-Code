@@ -24,7 +24,7 @@ std::string lower_ascii(std::string text) {
 
 bool is_key_command(std::string_view command) {
     return command == "/key-gemini" || command == "/key-deepseek" ||
-        command == "/key-openrouter";
+        command == "/key-openrouter" || command == "/key-omniroute";
 }
 
 std::string_view trim_ascii_whitespace(std::string_view text) {
@@ -86,7 +86,8 @@ std::optional<ParsedApiKeyCommand> parse_api_key_command(std::string_view input)
         ? std::string_view{} : trim_ascii_whitespace(input.substr(separator + 1));
     const auto kind = command == "/key-gemini" ? ApiKeyCommand::gemini
         : command == "/key-deepseek" ? ApiKeyCommand::deepseek
-                                      : ApiKeyCommand::openrouter;
+        : command == "/key-openrouter" ? ApiKeyCommand::openrouter
+        : ApiKeyCommand::omniroute;
     return ParsedApiKeyCommand{kind, !remainder.empty()};
 }
 
@@ -97,6 +98,7 @@ std::string safe_command_echo(std::string_view input) {
     case ApiKeyCommand::gemini: return "/key-gemini";
     case ApiKeyCommand::deepseek: return "/key-deepseek";
     case ApiKeyCommand::openrouter: return "/key-openrouter";
+    case ApiKeyCommand::omniroute: return "/key-omniroute";
     }
     return {};
 }
@@ -129,7 +131,7 @@ std::vector<std::string> help_lines() {
         "  /agent reviewer <task>     Run Reviewer only (read-only)",
         "",
         "Provider:",
-        "  /provider <name>           Select provider",
+        "  /provider <name>           Select provider: gemini, deepseek, openrouter, omniroute",
         "  /models                    List available models",
         "  /model <name>              Select model",
         "",
@@ -137,6 +139,7 @@ std::vector<std::string> help_lines() {
         "  /key-gemini                Set Gemini API key securely",
         "  /key-deepseek              Set DeepSeek API key securely",
         "  /key-openrouter            Set OpenRouter API key securely",
+        "  /key-omniroute             Set OmniRoute API key securely",
         "",
         "Session:",
         "  /status                    Show current configuration",

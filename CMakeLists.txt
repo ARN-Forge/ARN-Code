@@ -6,6 +6,10 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if (MSVC)
+    add_compile_options(/utf-8 /EHsc)
+endif()
+
 include(FetchContent)
 
 # cpp-httplib discovers OpenSSL through CMake when this option is enabled.
@@ -51,7 +55,7 @@ else()
     if (arn_core_FOUND)
         message(STATUS "Found installed arn_core: ${arn_core_DIR}")
     else()
-        set(ARN_CORE_GIT_REVISION "05f048d5abd83928a6b05ec7c5131d3032ea8a26")
+        set(ARN_CORE_GIT_REVISION "4abac2a09f1ff887640948a55ee21c4f1b6c7ecd")
         message(STATUS "Fetching arn_core ${ARN_CORE_GIT_REVISION} from https://github.com/ARN-Forge/arn-core.git")
         FetchContent_Declare(
             arn_core

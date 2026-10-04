@@ -11,7 +11,7 @@ namespace arn {
 
 enum class SecretInputState { editing, submitted, cancelled };
 
-enum class ApiKeyCommand { gemini, deepseek, openrouter };
+enum class ApiKeyCommand { gemini, deepseek, openrouter, omniroute };
 
 struct ParsedApiKeyCommand {
     ApiKeyCommand command;

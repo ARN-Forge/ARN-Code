@@ -223,7 +223,7 @@ private:
     bool context_{};
 };
 
-constexpr std::array command_hints{"/agent", "/key-gemini", "/key-deepseek", "/key-openrouter", "/model", "/models", "/provider", "/status", "/clear-session", "/clear", "/help", "/exit"};
+constexpr std::array command_hints{"/agent", "/key-gemini", "/key-deepseek", "/key-openrouter", "/key-omniroute", "/model", "/models", "/provider", "/status", "/clear-session", "/clear", "/help", "/exit"};
 
 std::string input_hint(std::string_view input) {
     if (!input.starts_with('/') || input.find_first_of(" \t") != std::string_view::npos) {
@@ -381,7 +381,18 @@ int run() {
         else if (command == "/help") {
             for (const auto& line : arn::help_lines()) ui.add(Tone::muted, line);
         }
-        else if (command == "/status") ui.add(Tone::normal, "Provider: " + arn::provider_name(provider) + " | Model: " + (model.empty() ? "not selected" : model) + " | API key: " + (key.empty() ? "not set" : "set") + " | Context: " + (context_active ? "active" : "empty"));
+        else if (command == "/status") {
+            if (provider == arn::Provider::omniroute) {
+                const auto* active = session.provider();
+                auto configured = active && active->kind() == provider && !key.empty()
+                    ? std::unique_ptr<arn::IModelProvider>{} : arn::make_provider(provider);
+                const auto endpoint = arn::provider_endpoint(configured ? *configured : *active);
+                const std::string base_url = endpoint.empty() ? "invalid endpoint configuration" : endpoint;
+                ui.add(Tone::normal, "Provider: " + arn::provider_name(provider) + " | Model: " + (model.empty() ? "not selected" : model) + " | API key: " + (key.empty() ? "not set" : "set") + " | Endpoint: " + base_url + " | Context: " + (context_active ? "active" : "empty"));
+            } else {
+                ui.add(Tone::normal, "Provider: " + arn::provider_name(provider) + " | Model: " + (model.empty() ? "not selected" : model) + " | API key: " + (key.empty() ? "not set" : "set") + " | Context: " + (context_active ? "active" : "empty"));
+            }
+        }
         else if (command == "/clear-session") { session.reset_session(); context_active = false; ui.add(Tone::good, "Chat context cleared. Key and model are unchanged."); }
         else if (command == "/models") { if (models.empty()) ui.add(Tone::warning, "No verified API key is active."); else for (const auto& name : models) ui.add(Tone::normal, "• " + name); }
         else if (const auto agent_command = arn::parse_agent_command(input); agent_command) {
@@ -440,14 +451,18 @@ int run() {
                                          {.output = output, .decide_plan = decide_plan}, confirm);
         } else if (command == "/provider") {
             const auto selected = arn::provider_from_name(lower_ascii(argument));
-            if (selected == arn::Provider::none) ui.add(Tone::warning, "Supported providers: gemini, deepseek, openrouter");
+            if (selected == arn::Provider::none) ui.add(Tone::warning, "Supported providers: gemini, deepseek, openrouter, omniroute");
             else { provider = selected; key.clear(); model.clear(); models.clear(); session.reset_session(); context_active = false; ui.add(Tone::good, "Active provider: " + arn::provider_name(provider)); }
         } else if (key_command) {
-            const auto selected = key_command->command == arn::ApiKeyCommand::gemini
-                ? arn::Provider::gemini
-                : key_command->command == arn::ApiKeyCommand::deepseek
-                    ? arn::Provider::deepseek
-                    : arn::Provider::openrouter;
+            const auto selected = [&] {
+                switch (key_command->command) {
+                case arn::ApiKeyCommand::gemini: return arn::Provider::gemini;
+                case arn::ApiKeyCommand::deepseek: return arn::Provider::deepseek;
+                case arn::ApiKeyCommand::openrouter: return arn::Provider::openrouter;
+                case arn::ApiKeyCommand::omniroute: return arn::Provider::omniroute;
+                }
+                return arn::Provider::none;
+            }();
             if (key_command->has_inline_value) {
                 ui.add(Tone::warning, "Inline API key entry is disabled. Run " + command +
                                       " without an argument to enter it securely.");

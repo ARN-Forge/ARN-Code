@@ -1,6 +1,7 @@
 #include "model_provider.hpp"
 
 #include <arn/core/provider/openrouter_provider.hpp>
+#include <arn/core/provider/openai_provider.hpp>
 
 namespace arn {
 
@@ -17,6 +18,12 @@ std::unique_ptr<::arn::core::IModelProvider> make_provider(Provider provider) {
         }
     }
     return core_provider;
+}
+
+std::string provider_endpoint(const IModelProvider& provider) {
+    if (const auto* compatible = dynamic_cast<const ::arn::core::OpenAiCompatibleProvider*>(&provider))
+        return compatible->base_url();
+    return {};
 }
 
 } // namespace arn

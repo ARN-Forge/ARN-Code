@@ -17,6 +17,9 @@ using ModelProvider = ::arn::core::IModelProvider;
 
 [[nodiscard]] std::unique_ptr<::arn::core::IModelProvider> make_provider(Provider provider);
 
+// Read the provider's resolved configuration; do not resolve environment overrides in the UI.
+[[nodiscard]] std::string provider_endpoint(const IModelProvider& provider);
+
 [[nodiscard]] inline Provider provider_from_name(std::string_view name) {
     return ::arn::core::provider_type_from_name(name);
 }
