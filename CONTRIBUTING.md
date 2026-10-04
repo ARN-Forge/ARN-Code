@@ -1,6 +1,11 @@
-# Contributing to Arn Agent Code
+# Contributing to ARN Code
 
 Thanks for contributing.
+
+The default test-enabled build needs CMake 3.20+, a C++23 compiler, OpenSSL
+development libraries, Git, and Node.js for the deterministic fake ACP fixtures.
+Install Python 3 to include the server protocol tests. Native CLI execution
+does not require Node.js or Python.
 
 ## Before opening a pull request
 
@@ -13,6 +18,7 @@ Thanks for contributing.
    ```powershell
    cmake -S . -B build
    cmake --build build --config Release
+   ctest --test-dir build -C Release --output-on-failure
    ```
 
    On Linux or macOS with Ninja:
@@ -20,10 +26,16 @@ Thanks for contributing.
    ```bash
    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
    cmake --build build --parallel
+   ctest --test-dir build --output-on-failure
    ```
 
    macOS contributors should also pass
    `-DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"` when configuring.
+
+Normal CTest does not require Kiro authentication. Real-Kiro smoke tests are
+opt-in with `-DARN_ENABLE_KIRO_INTEGRATION_TESTS=ON` and skip when unavailable.
+For release/dependency validation, use a clean source checkout without an
+adjacent or installed ARN Core override so CMake fetches the pinned Core commit.
 
 ## Pull requests
 

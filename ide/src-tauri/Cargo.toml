@@ -1,6 +1,6 @@
 [package]
 name = "arn-ide"
-version = "0.7.1"
+version = "0.8.0"
 description = "ARN IDE - Lightweight desktop IDE for coding"
 authors = ["ARN contributors"]
 license = "MIT"

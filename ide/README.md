@@ -1,4 +1,4 @@
-# ARN IDE v0.7.1
+# ARN IDE v0.8.0
 
 ARN's desktop editor uses Tauri 2, React and Monaco. Its AI providers, model
 catalogue, conversation and file tools run in the C++ ARN engine through
@@ -7,7 +7,7 @@ catalogue, conversation and file tools run in the C++ ARN engine through
 ## Windows download
 
 Extract **arn-ide-windows-x64.zip** from the
-[GitHub release](https://github.com/ARN-Forge/ARN-Code/releases/tag/v0.5.0) and run
+[latest GitHub release](https://github.com/ARN-Forge/ARN-Code/releases/latest) and run
 `arn-ide.exe`. Keep `arn.exe` and the OpenSSL DLLs beside it. Windows WebView2
 Runtime is required. This is an unsigned portable archive.
 
@@ -56,7 +56,7 @@ npm run installer:build
 npm run installer:test
 ```
 
-Output: `src-tauri/target/release/bundle/nsis/ARN IDE_0.7.1_x64-setup.exe`.
+Output: `src-tauri/target/release/bundle/nsis/ARN IDE_0.8.0_x64-setup.exe`.
 `ARN_BIN` can select the C++ executable; `ARN_RUNTIME_DIR` can supply DLL search
 directories separated by semicolons. The packager follows x64 PE imports and
 includes the matching OpenSSL and MSVC redistributable DLLs. It fails if a
@@ -77,6 +77,8 @@ Open a project, verify your Gemini or DeepSeek API key, load the provider's
 models and select one. Requests stream text and report progress. Every agent
 file mutation requires approval of its before/after preview, with a
 120-second default-deny timeout. Keys remain in memory.
+OmniRoute and Kiro ACP are currently CLI features; they are not exposed by
+the IDE agent panel.
 
 Save or close unsaved tabs before sending a prompt. While a request is active,
 the editor is read-only; file events refresh the tree and clean editor buffers.
@@ -91,7 +93,8 @@ text files up to 256 KiB; editor reads are limited to 5 MiB.
 
 See the [integration guide](../docs/ide-arn-bridge.md) for protocol 2,
 executable discovery, security behavior, local test commands and validation
-limits. The [release notes](../docs/releases/v0.5.0.md) describe this version.
+limits. See the [v0.8.0 release notes](../docs/releases/v0.8.0.md) for the
+CLI/backend changes accompanying this IDE version.
 
 ## Icon
 

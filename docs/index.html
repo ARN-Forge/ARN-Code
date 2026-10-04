@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="ARN is a native C++ terminal coding agent for Gemini and DeepSeek.">
-  <title>ARN — native terminal coding agent</title>
+  <meta name="description" content="ARN Code is a native C++23 terminal coding agent with Gemini, DeepSeek, OpenRouter, OmniRoute, and optional Kiro ACP integration.">
+  <title>ARN Code — native terminal coding agent</title>
   <style>
     :root { --bg:#071011; --panel:#0d1c1d; --line:#1b5559; --cyan:#59e3e8; --orange:#ff8a00; --amber:#fff0a5; --text:#d5dfdf; --muted:#91a4a5; }
     * { box-sizing:border-box; }
@@ -115,7 +115,7 @@
 <body>
   <div class="wrap">
     <nav>
-      <a class="brand" href="#top">ARN</a>
+      <a class="brand" href="#top">ARN Code</a>
       <a href="#demo">Try the demo</a><a href="#install">Install</a><a href="https://github.com/ARN-Forge/ARN-Code">GitHub ↗</a>
     </nav>
 
@@ -124,9 +124,9 @@
         <div>
           <div class="eyebrow">native C++23 coding agent</div>
           <h1>Your terminal.<br>Your model.<br><em>Your little crab.</em></h1>
-          <p class="lead">ARN is a fast terminal companion for coding workflows. Connect Gemini or DeepSeek, give it a project folder, and review every file change before it happens.</p>
+          <p class="lead">ARN Code is a native terminal companion for coding workflows. Connect Gemini, DeepSeek, OpenRouter, or local OmniRoute and review native file changes before they happen. Kiro is also available as an external ACP backend.</p>
           <div class="actions">
-            <a class="button" href="#install">Install ARN</a>
+            <a class="button" href="#install">Install ARN Code</a>
             <a class="button secondary" href="#demo">Try the demo ↗</a>
           </div>
         </div>
@@ -157,11 +157,11 @@
       <section id="features">
         <div class="eyebrow">Made for the terminal</div>
         <h2>Small runtime. Serious guardrails.</h2>
-        <p class="section-lead">No Node.js, no Python runtime, and no background account. API keys and conversation history stay in memory for the active session.</p>
+        <p class="section-lead">Native provider mode needs no Node.js or Python runtime and keeps keys/history in memory. Optional Kiro ACP mode requires an installed, authenticated kiro-cli and uses its own tools and security policy. <a href="https://github.com/ARN-Forge/ARN-Code#kiro-through-acp">Read the backend requirements ↗</a></p>
         <div class="grid">
-          <article class="card"><div class="icon">✦</div><h3>Gemini + DeepSeek</h3><p>Choose a model per API key and keep a focused, in-memory conversation context.</p></article>
+          <article class="card"><div class="icon">✦</div><h3>Native providers</h3><p>Gemini, DeepSeek, OpenRouter, and OmniRoute. OmniRoute defaults to localhost:20128/v1; no endpoint configuration is needed.</p></article>
           <article class="card"><div class="icon">↯</div><h3>Streaming replies</h3><p>See the model response as it is generated instead of waiting for the whole answer.</p></article>
-          <article class="card"><div class="icon">⌘</div><h3>Safe file tools</h3><p>Read, create, edit, and delete files only inside the launch folder—with confirmation for changes.</p></article>
+          <article class="card"><div class="icon">⌘</div><h3>Native file tools</h3><p>Read, create, edit, and delete files only inside the launch folder—with confirmation for changes. External ACP tools follow the backend's policy.</p></article>
           <article class="card"><div class="icon">◎</div><h3>Windows, Linux, macOS</h3><p>Use the same terminal workflow on Windows x64, Linux x64, Apple Silicon, and Intel Macs.</p></article>
         </div>
       </section>
@@ -169,7 +169,7 @@
       <section id="install">
         <div class="eyebrow">Windows · Linux · macOS</div>
         <h2>Install from a terminal.</h2>
-        <p class="section-lead">Choose your platform. ARN is MIT-licensed; API usage may incur charges from your model provider.</p>
+        <p class="section-lead">Choose your platform. ARN Code is MIT-licensed; API usage may incur charges from your model provider.</p>
         <div class="installer"><div class="platforms" role="group" aria-label="Operating system"><button data-platform="windows" class="active" aria-pressed="true">Windows</button><button data-platform="linux" aria-pressed="false">Linux</button><button data-platform="macos" aria-pressed="false">macOS</button></div>
         <div class="install-caption"><span id="shell-name">PowerShell · x64</span><a id="script-link" href="https://github.com/ARN-Forge/ARN-Code/blob/main/scripts/install.ps1">Read the installer ↗</a></div>
         <div class="command-box"><pre><code id="install-command">irm https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.ps1 | iex</code></pre><button id="copy">Copy command</button></div>
@@ -181,9 +181,9 @@
         <div class="eyebrow">First session</div>
         <h2>Connect, choose a model, build.</h2>
         <ol class="steps">
-          <li>Start ARN from the folder where you want it to work.</li>
-          <li>Add a key with <code>/key-gemini</code> or <code>/key-deepseek</code>, then select a model.</li>
-          <li>Ask naturally. ARN asks before any file is created, edited, or deleted.</li>
+          <li>Start <code>arn</code> from your project folder.</li>
+          <li>Use <code>/key-gemini</code>, <code>/key-deepseek</code>, <code>/key-openrouter</code>, or <code>/key-omniroute</code>. Enter the key at the masked prompt, then use <code>/models</code> and <code>/model &lt;id&gt;</code>.</li>
+          <li>Ask naturally. Native file tools request approval before changes. A listed model may still be unavailable for your account/session.</li>
         </ol>
       </section>
       <section class="closing"><p class="eyebrow">Made in the open</p><h2>A work in progress.<br>Come build with us.</h2><p>Try it, report a rough edge, or contribute your next idea.</p><div class="actions" style="justify-content:center"><a class="button secondary" href="https://github.com/ARN-Forge/ARN-Code">Explore the source ↗</a></div></section>

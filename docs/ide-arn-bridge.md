@@ -15,7 +15,7 @@ $env:CARGO_PROFILE_DEV_DEBUG = '0'
 npm run tauri:dev
 ```
 
-Build dependencies must already be installed (CMake, the C++ toolchain, OpenSSL development libraries, Rust/Tauri prerequisites, Node dependencies). This checkout has `ide/node_modules`; a new checkout also needs `npm ci` in `ide`.
+Build dependencies must already be installed (CMake, the C++ toolchain, OpenSSL development libraries, Rust/Tauri prerequisites, Node dependencies). Run `npm ci` in `ide` before the development command in a new checkout. The default C++ test build uses Node.js for fake ACP fixtures and Python 3 for server protocol tests.
 
 Executable discovery checks `ARN_BIN`, Tauri's resource directory, the directory beside the IDE executable, repository-relative development build directories, then PATH. Set `ARN_BIN` to an absolute executable path to override discovery. Runtime DLLs must be discoverable by the Windows loader (beside ARN or on PATH). No user-specific fallback path is embedded. The Windows portable release ZIP includes ARN and its OpenSSL DLLs beside the IDE; it is not an installer.
 
@@ -59,7 +59,11 @@ Windows sandbox restrictions can prevent MSBuild FileTracker, child-process acce
 
 No live provider request or interactive desktop UI validation was performed for this implementation. These local tests do not prove real Gemini/DeepSeek tool-call behavior. Test one small file creation, rejection, cancellation, project switch and IDE close with your own key before relying on the integration for valuable work. This is project-boundary validation, not an OS sandbox against another local process actively racing filesystem changes.
 
-## Verification result for this checkout
+## Historical v0.5.0 verification
+
+The results below describe the original bridge implementation, not the current
+release's validation or test counts. See [v0.8.0 notes](releases/v0.8.0.md) for
+the current release scope.
 
 - C++ Release build: passed (`build-ide/Release/arn.exe`).
 - CTest: 3/3 passed. Windows junction escape tests passed. Ordinary symlink creation was skipped because the account lacks the symbolic-link privilege.
