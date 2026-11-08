@@ -407,8 +407,9 @@ private:
     std::string current_hint() const {
         if (copy_mode_) return "COPY MODE · Drag to select, then " + std::string(copy_shortcut) + " · F2 returns to scrolling";
 #ifdef _WIN32
-        // The Windows alternate screen does not read the mouse wheel.
-        if (!view_.follow) return "Scrolled up · PgDn or End returns to the latest message";
+        // Text selection differs between Windows hosts (see README), so the
+        // hint names only the keys and the wheel.
+        if (!view_.follow) return "Scrolled up · Wheel down, PgDn or End returns to the latest message";
 #else
         if (!view_.follow) return "Scrolled up · Wheel down or End returns to the latest message · Shift+drag selects text";
 #endif

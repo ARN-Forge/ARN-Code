@@ -191,6 +191,29 @@ INPUT_RECORD key(WORD vk, wchar_t ch, DWORD control = 0, WORD repeat = 1) {
 }
 const INPUT_RECORD ctrl_c = key('C', 3, LEFT_CTRL_PRESSED);
 
+// A console mouse record; for the wheel, `delta` is 120 per notch (positive:
+// forward, which scrolls up).
+INPUT_RECORD mouse(DWORD flags, SHORT delta = 0) {
+    INPUT_RECORD record{};
+    record.EventType = MOUSE_EVENT;
+    record.Event.MouseEvent.dwEventFlags = flags;
+    record.Event.MouseEvent.dwButtonState = static_cast<DWORD>(static_cast<WORD>(delta)) << 16;
+    record.Event.MouseEvent.dwMousePosition = {10, 12};
+    return record;
+}
+INPUT_RECORD wheel(SHORT delta) { return mouse(MOUSE_WHEELED, delta); }
+
+// The input mode while ARN runs: the alternate screen reads the mouse wheel
+// (mouse input on, Quick Edit off); plain output leaves the mouse to the host.
+bool reads_wheel(HANDLE input) {
+    DWORD mode{};
+    return GetConsoleMode(input, &mode) && (mode & ENABLE_MOUSE_INPUT) && !(mode & ENABLE_QUICK_EDIT_MODE);
+}
+bool host_owns_mouse(HANDLE input) {
+    DWORD mode{};
+    return GetConsoleMode(input, &mode) && !(mode & ENABLE_MOUSE_INPUT) && (mode & ENABLE_QUICK_EDIT_MODE);
+}
+
 void send(HANDLE input, const std::vector<INPUT_RECORD>& records) {
     DWORD written{};
     check(WriteConsoleInputW(input, records.data(), static_cast<DWORD>(records.size()), &written) &&
@@ -399,6 +422,8 @@ void lifecycle(const Console& console, bool fail) {
         arn::TerminalSession terminal;
         Ui ui(terminal);
         check(!terminal.native_scrollback(), "The alternate screen was not selected");
+        // Restored with the other console modes below, on both exit paths.
+        check(reads_wheel(console.input), "The alternate screen does not read the mouse wheel");
         ui.session("Gemini", "fake-model", true);
         ui.status(ui.ready_status());
         for (const auto& [tone, text] : entries) ui.add(tone, text);
@@ -467,7 +492,8 @@ void resize_while_scrolled(const Console& console) {
             const int header = size.X - 4 < 58 ? 5 : size.X - 4 < 76 ? 7 : 9;
             check(prompt_rows() == 1, "More than one prompt after a resize");
             check(occurrences(joined(rows), L"ARN AGENT CODE") == 1, "The header was not shown once after a resize");
-            check(rows[rows.size() - 2].starts_with(L"Scrolled up · PgDn or End"), "The scrolled hint was lost");
+            check(rows[rows.size() - 2].starts_with(L"Scrolled up · Wheel down, PgDn or End"),
+                  "The scrolled hint was lost");
             check(rows[static_cast<std::size_t>(header) + 1] == top, "A resize lost the reading position");
         }
     }
@@ -479,9 +505,10 @@ void resize_while_scrolled(const Console& console) {
 }
 
 // During a request the cancellation monitor owns input. With the alternate
-// screen it keeps PgUp/PgDn/End for the renderer; with plain output
-// (redirected standard output here) it drops them.
+// screen it keeps PgUp/PgDn/End and the mouse wheel for the renderer; with
+// plain output (redirected standard output here) it drops them.
 void monitor_view_keys(const Console& console) {
+    using Type = arn::TerminalEventType;
     for (const bool alternate : {true, false}) {
         set_renderer(nullptr);
         HANDLE reader{}, pipe{};
@@ -492,24 +519,31 @@ void monitor_view_keys(const Console& console) {
         auto* previous = std::cout.rdbuf(&writer);
         {
             arn::TerminalSession terminal;
+            check(alternate ? reads_wheel(console.input) : host_owns_mouse(console.input),
+                  alternate ? "The alternate screen does not read the mouse wheel"
+                            : "Plain output took the mouse from the host");
             std::atomic_bool cancelled{false};
             std::atomic_int requests{0};
             arn::TerminalCancellationMonitor monitor(cancelled, [&] { ++requests; });
-            send(console.input, {key(VK_PRIOR, 0, 0, 2), key('X', L'x'), key(VK_NEXT, 0), key(VK_END, 0)});
+            send(console.input, {key(VK_PRIOR, 0, 0, 2), key('X', L'x'), key(VK_NEXT, 0), key(VK_END, 0),
+                                 wheel(120), mouse(MOUSE_MOVED), mouse(MOUSE_HWHEELED, 120), wheel(40),
+                                 wheel(-240)});
             std::vector<arn::TerminalEvent> events;
             wait_until([&] {
                 for (auto& event : arn::take_deferred_view_events()) events.push_back(std::move(event));
-                return events.size() >= 3;
+                return events.size() >= 5;
             }, alternate ? 3s : 500ms);
             if (alternate) {
-                check(events.size() == 3 && events[0].type == arn::TerminalEventType::page_up &&
-                          events[0].repeat_count == 2 && events[1].type == arn::TerminalEventType::page_down &&
-                          events[2].type == arn::TerminalEventType::end,
-                      "The monitor did not keep the view keys in order");
+                check(events.size() == 5 && events[0].type == Type::page_up && events[0].repeat_count == 2 &&
+                          events[1].type == Type::page_down && events[2].type == Type::end &&
+                          events[3].type == Type::wheel_up && events[3].repeat_count == 1 &&
+                          events[4].type == Type::wheel_down && events[4].repeat_count == 2,
+                      "The monitor did not keep the view keys and the wheel in order");
             } else {
                 check(terminal.native_scrollback() && events.empty(), "Plain output must not keep view keys");
             }
-            check(!cancelled.load() && requests.load() == 0, "A view key or typed text cancelled the request");
+            check(!cancelled.load() && requests.load() == 0,
+                  "A view key, the mouse or typed text cancelled the request");
             send(console.input, {key(VK_ESCAPE, 27)});
             check(wait_until([&] { return cancelled.load(); }, 3s) && requests.load() == 1, "Esc did not cancel");
         }
@@ -518,7 +552,7 @@ void monitor_view_keys(const Console& console) {
         CloseHandle(pipe);
         CloseHandle(reader);
     }
-    std::puts("console: request monitor: view keys kept for the alternate screen only; Esc cancels");
+    std::puts("console: request monitor: view keys and the wheel kept for the alternate screen only; Esc cancels");
 }
 
 // --- ARN itself on this console ----------------------------------------------
@@ -595,6 +629,8 @@ void arn_alternate_session(const Console& console, const std::wstring& arn) {
         check(alternate_screen_active(), "ARN did not use the alternate screen by default");
         check(joined(visible_rows()).find(L"ARN AGENT CODE") != std::wstring::npos, "The header is missing");
         check(joined(visible_rows()).find(L"before-arn-marker") == std::wstring::npos, "The shell screen shows through");
+        // run_arn checks afterwards that ARN restored the original mode.
+        check(reads_wheel(console.input), "ARN does not read the mouse wheel on the alternate screen");
 
         type_when_idle(console, L"/acp kiro");
         check(wait_screen(L"ACP agent ready: Kiro via kiro-cli", 20s), "The ACP backend did not start");
@@ -668,7 +704,7 @@ void arn_alternate_session(const Console& console, const std::wstring& arn) {
         type_when_idle(console, L"__FAKE_ACP_CMD__ stream-lines");
         check(wait_screen(L"line 12 "), "Streaming did not start");
         send(console.input, {key(VK_PRIOR, 0)});
-        check(wait_hint(L"Scrolled up · PgDn or End"), "PgUp during streaming did not scroll");
+        check(wait_hint(L"Scrolled up · Wheel down, PgDn or End"), "PgUp during streaming did not scroll");
         const auto transcript = [] {
             auto rows = stable_rows();
             return std::vector<std::wstring>(rows.begin() + 10, rows.end() - 4);
@@ -686,6 +722,28 @@ void arn_alternate_session(const Console& console, const std::wstring& arn) {
         check(wait_hint(L"Scrolled up"), "PgUp at the prompt did not scroll");
         send(console.input, {key(VK_NEXT, 0, 0, 20)});
         check(wait_hint(L"Type /help for commands"), "PgDn did not return to the newest output");
+
+        // The mouse wheel does the same: wheel up while output arrives pins the
+        // rows being read, a move or the horizontal wheel changes nothing, End
+        // follows again; at the prompt wheel down returns to the newest output.
+        type_when_idle(console, L"__FAKE_ACP_CMD__ stream-lines");
+        check(wait_screen(L"line 12 "), "The wheel stream did not start");
+        send(console.input, {wheel(120)});
+        check(wait_hint(L"Scrolled up · Wheel down"), "The wheel during streaming did not scroll");
+        pinned = transcript();
+        std::this_thread::sleep_for(700ms);
+        check(transcript() == pinned, "New output moved the rows read after a wheel scroll");
+        send(console.input, {mouse(MOUSE_MOVED), mouse(MOUSE_HWHEELED, -120), mouse(MOUSE_MOVED)});
+        std::this_thread::sleep_for(300ms);
+        check(bottom_row(2).starts_with(L"Scrolled up") && transcript() == pinned,
+              "A mouse move or the horizontal wheel moved the view");
+        send(console.input, {key(VK_END, 0)});
+        check(wait_screen(L"line 60 ", 15s), "End did not return to the newest output after a wheel scroll");
+        check(wait_hint(L"Type /help for commands", 15s), "The wheel-scrolled reply did not finish");
+        send(console.input, {wheel(240)});
+        check(wait_hint(L"Scrolled up"), "The wheel at the prompt did not scroll");
+        send(console.input, {wheel(-120 * 40)});
+        check(wait_hint(L"Type /help for commands"), "Wheel down did not return to the newest output");
 
         // Window resizes while output arrives.
         type_when_idle(console, L"__FAKE_ACP_CMD__ stream-lines");
@@ -734,7 +792,7 @@ void arn_alternate_session(const Console& console, const std::wstring& arn) {
     for (const auto& [token, expected] :
          {std::pair<std::wstring_view, std::size_t>{L"arn › __FAKE_ACP_CMD__ stream-and-finish", 1},
           {L"hello world", 1}, {L"choice=allow", 1}, {L"choice=reject", 1}, {L"Request cancelled.", 3},
-          {L"ACP tool: delete important file [y/N] y", 1}, {L"line 37 Привіт 你好", 2}, {L"arn › /exit", 1}})
+          {L"ACP tool: delete important file [y/N] y", 1}, {L"line 37 Привіт 你好", 3}, {L"arn › /exit", 1}})
         check(squeezed_occurrences(screen, token) == expected, "The printed conversation is wrong: " +
               std::to_string(squeezed_occurrences(screen, token)) + " copies of a token");
     check(squeezed_occurrences(screen, unicode) == 1, "The printed Unicode reply is not intact");
@@ -745,7 +803,8 @@ void arn_alternate_session(const Console& console, const std::wstring& arn) {
     check(wait_until([] { return count_processes(L"fake_kiro_cli.exe") == 0; }, 5s), "The ACP backend outlived ARN");
     std::puts("console: ARN default (no ARN_TERMINAL_RENDERER) uses the alternate screen: streaming, Unicode, a long "
               "wrapped message, tools, y/N, Esc, Ctrl+C keys and console Ctrl+C events (request and prompt), "
-              "PgUp/PgDn/End while streaming, 8 resizes while streaming, secure key input, /exit printed once, "
+              "PgUp/PgDn/End and the mouse wheel while streaming, 8 resizes while streaming, secure key input, "
+              "/exit printed once, "
               "console restored");
 }
 
@@ -869,6 +928,7 @@ void arn_redirected_output(const Console& console, const std::wstring& arn, cons
         });
     };
     const bool started = read_until("Type /help for commands");
+    const bool host_mouse = host_owns_mouse(console.input); // While ARN runs with plain output.
     send(console.input, typed(L"/exit"));
     const bool exited = WaitForSingleObject(process.hProcess, 10000) == WAIT_OBJECT_0;
     if (!exited) TerminateProcess(process.hProcess, 99);
@@ -883,6 +943,7 @@ void arn_redirected_output(const Console& console, const std::wstring& arn, cons
     }
     CloseHandle(reader);
     check(started && exited && code == 0, "ARN with redirected output did not run and exit");
+    check(host_mouse, "ARN with redirected output took the mouse from the host");
     check(output.find("1049h") == std::string::npos, "Redirected output must not use the alternate screen");
     // Colour only, apart from the session's mouse-mode and cursor resets.
     for (auto at = output.find('\x1b'); at != std::string::npos; at = output.find('\x1b', at + 1)) {

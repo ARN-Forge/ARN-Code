@@ -162,17 +162,23 @@ incur charges and is subject to the provider's quota and availability.
 ## Terminal display
 
 ARN Code draws its interface on the terminal's alternate screen, so the shell
-history above stays untouched while it runs. PgUp, PgDn and End scroll the
-conversation, also while a reply is streaming (on Linux the mouse wheel
-scrolls too, and F2 toggles copy mode). When ARN Code exits, the
-conversation is printed once into normal scrollback.
+history above stays untouched while it runs. The mouse wheel, PgUp, PgDn and
+End scroll the conversation, also while a reply is streaming; End, or
+scrolling back down, returns to the newest output. On Linux and macOS, hold
+Shift and drag to select text, or press F2 for copy mode. When ARN Code exits,
+the conversation is printed once into normal scrollback.
 
 On Windows this is the only interactive display: ARN Code uses the alternate
-screen whenever standard input and standard output are a console. If either is
-redirected (a pipe or a file), it prints plain append-only output instead: the
-banner, the conversation and prompt lines, in colour but without moving the
-cursor or switching screens. ARN Code reads keys only from a console, so with
-redirected standard input it reads no commands and exits.
+screen whenever standard input and standard output are a console. It reads the
+mouse wheel there, so dragging no longer selects text while it runs: in
+Windows Terminal hold Shift and drag; in the classic console window use
+Edit > Mark from the window menu. If your terminal does not pass the wheel to
+console programs, use PgUp, PgDn and End. If standard input or output is
+redirected (a pipe or a file), ARN Code prints plain append-only output
+instead: the banner, the conversation and prompt lines, in colour but without
+moving the cursor or switching screens, and it leaves the mouse to the
+terminal. ARN Code reads keys only from a console, so with redirected standard
+input it reads no commands and exits.
 
 `ARN_TERMINAL_RENDERER` no longer selects anything. The previous Windows
 renderer (`native`) has been removed; `native`, and any value other than
