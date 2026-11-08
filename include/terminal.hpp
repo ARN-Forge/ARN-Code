@@ -1,8 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -34,6 +36,9 @@ enum class TerminalEventType {
 struct TerminalEvent {
     TerminalEventType type{TerminalEventType::none};
     std::string text;
+    // One decoded scalar/editing key, repeated within one host record. Keeping
+    // the bounded count avoids a pending replay queue crossing input modes.
+    std::uint16_t repeat_count{1};
 };
 
 class TerminalSession {
@@ -52,7 +57,11 @@ public:
     [[nodiscard]] int read_confirmation(
         const std::function<void(std::string_view)>& display,
         const std::atomic_bool* cancelled);
+    // True: append-only plain output (Windows with redirected input or
+    // output). False: the interactive alternate-screen viewport.
     [[nodiscard]] bool native_scrollback() const noexcept;
+    // Drop queued keys and any interrupt received before this call.
+    void discard_pending_input();
 
     void set_copy_mode(bool enabled);
     [[nodiscard]] bool copy_mode() const noexcept;

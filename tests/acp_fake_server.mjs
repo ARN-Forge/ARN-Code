@@ -7,6 +7,8 @@
 //   stream-and-finish       → streams agent text, a tool call, and turn_end
 //   permission-then-finish  → asks session/request_permission, awaits reply,
 //                             then emits text + turn_end
+//   stream-lines            → sixty numbered lines, slowly (POSIX PTY suite)
+//   stream-unicode          → mixed-script text, one code point per chunk
 //   crash                   → exits with code 2 mid-prompt
 //   malformed-session       → returns an object missing sessionId for session/new
 //   plain                   → returns an immediate stopReason
@@ -201,6 +203,34 @@ async function handlePromptCommand(cmd, sessionId) {
           content: { type: 'text', text: 'session=' + sessionId + ';choice=' + choices.join(',') } } });
       notification('session/update', { sessionId, update: { sessionUpdate: 'turn_end' } });
       return { stopReason: choices.includes('cancelled') ? 'cancelled' : 'end_turn' };
+    }
+    case 'stream-lines': {
+      // Used by the POSIX PTY suite: sixty numbered lines in small chunks,
+      // slowly enough to scroll and resize while they arrive.
+      let stop = false;
+      cancelTurn = () => { stop = true; };
+      for (let line = 1; line <= 60 && !stop; ++line) {
+        for (const piece of ['line ' + line + ' ', 'Привіт 你好 🙂', '\n']) {
+          notification('session/update', {
+            sessionId, update: { sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: piece } } });
+          await delay(20);
+        }
+      }
+      cancelTurn = undefined;
+      notification('session/update', { sessionId, update: { sessionUpdate: 'turn_end' } });
+      return { stopReason: stop ? 'cancelled' : 'end_turn' };
+    }
+    case 'stream-unicode': {
+      // One code point per chunk: Cyrillic, CJK, emoji and a combining mark.
+      for (const piece of Array.from('Unicode: Привіт ї є ґ, 你好世界, 🙂👍🎉, é end.')) {
+        notification('session/update', {
+          sessionId, update: { sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: piece } } });
+        await delay(2);
+      }
+      notification('session/update', { sessionId, update: { sessionUpdate: 'turn_end' } });
+      return { stopReason: 'end_turn' };
     }
     case 'crash':
       await delay(5);

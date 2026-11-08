@@ -35,4 +35,19 @@ int main() {
     scenario({{T::resize}, {T::character, "y"}, {T::escape}}, 27, {"", "y"});
     scenario({{T::interrupt}}, 3, {""});
     scenario({{T::end_of_input}}, '\n', {""});
+    scenario({{T::character, "y"}, {T::resize}, {T::backspace}, {T::resize},
+              {T::character, "n"}, {T::enter}}, 'n', {"", "y", "", "n"});
+    scenario({{T::character, "y"}, {T::resize}, {T::interrupt}}, 3, {"", "y"});
+    scenario({{T::character, "y"}, {T::resize}, {T::end_of_input}}, '\n', {"", "y"});
+    // Confirmation owns only its local choice, never a credential input value.
+    scenario({{T::character, "FAKE_SECRET_123"}, {T::enter}}, '\n', {"", ""});
+    // A previous decision must not authorize the next independent request.
+    scenario({{T::character, "y"}, {T::enter}}, 'y', {"", "y"});
+    scenario({{T::resize}, {T::enter}}, '\n', {""});
+    // A repeat is one pending choice, not automatic approval/submission.
+    scenario({{T::character, "y", 65535}, {T::enter, {}, 65535}}, 'y', {"", "y"});
+    scenario({{T::character, "y", 4}, {T::backspace, {}, 65535}, {T::enter}},
+             '\n', {"", "y", ""});
+    scenario({{T::escape, {}, 65535}}, 27, {""});
+    scenario({{T::interrupt, {}, 65535}}, 3, {""});
 }
