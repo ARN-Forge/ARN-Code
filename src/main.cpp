@@ -8,6 +8,10 @@
 #include "server.hpp"
 #include "terminal.hpp"
 #include "terminal_ui.hpp"
+#include "terminal_posix_view.hpp"
+#ifdef _WIN32
+#include "terminal_windows_mode.hpp"
+#endif
 #include "tools/coding_tools.hpp"
 #include <arn/core/agent/agent_session.hpp>
 
@@ -15,6 +19,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <exception>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -75,6 +80,19 @@ void erase_last_utf8_character(std::string& text) {
     text.erase(position);
 }
 
+// Scrolling keys. They move the view only, never the draft. The caller
+// renders afterwards.
+bool apply_view_event(Ui& ui, const arn::TerminalEvent& event) {
+    switch (event.type) {
+    case arn::TerminalEventType::wheel_up: ui.scroll(3); return true;
+    case arn::TerminalEventType::wheel_down: ui.scroll(-3); return true;
+    case arn::TerminalEventType::page_up: ui.scroll(8 * event.repeat_count); return true;
+    case arn::TerminalEventType::page_down: ui.scroll(-8 * event.repeat_count); return true;
+    case arn::TerminalEventType::end: ui.scroll_to_bottom(); return true;
+    default: return false;
+    }
+}
+
 std::string read_line(Ui& ui, arn::TerminalSession& terminal) {
     std::string buffer;
     ui.input({});
@@ -82,17 +100,13 @@ std::string read_line(Ui& ui, arn::TerminalSession& terminal) {
     for (;;) {
         const auto event = terminal.read_event();
         if (event.type == arn::TerminalEventType::resize) { ui.render(); continue; }
-        if (event.type == arn::TerminalEventType::wheel_up) { ui.scroll(3); ui.render(); continue; }
-        if (event.type == arn::TerminalEventType::wheel_down) { ui.scroll(-3); ui.render(); continue; }
         if (event.type == arn::TerminalEventType::f2) {
             terminal.set_copy_mode(!terminal.copy_mode());
             ui.copy_mode(terminal.copy_mode());
             ui.render_input();
             continue;
         }
-        if (event.type == arn::TerminalEventType::page_up) { ui.scroll(8 * event.repeat_count); ui.render(); continue; }
-        if (event.type == arn::TerminalEventType::page_down) { ui.scroll(-8 * event.repeat_count); ui.render(); continue; }
-        if (event.type == arn::TerminalEventType::end) { ui.scroll_to_bottom(); ui.render(); continue; }
+        if (apply_view_event(ui, event)) { ui.render(); continue; }
         if (event.type == arn::TerminalEventType::enter) { ui.input({}); ui.hint({}); return buffer; }
         if (event.type == arn::TerminalEventType::end_of_input) return "/exit";
         if (event.type == arn::TerminalEventType::escape || event.type == arn::TerminalEventType::interrupt) {
@@ -179,6 +193,17 @@ int run() {
     arn::TerminalSession terminal;
     Ui ui(terminal);
     ui.status(ui.ready_status());
+#ifdef _WIN32
+    if (const auto setting = arn::windows_renderer_setting(); !setting.recognized) {
+        ui.add(Tone::warning, setting.removed_native
+            ? "ARN_TERMINAL_RENDERER=\"" + setting.value + "\" is no longer supported: the native "
+              "renderer was removed. ARN uses the alternate screen in a console and plain output "
+              "when input or output is redirected. Remove the variable."
+            : "ARN_TERMINAL_RENDERER=\"" + setting.value + "\" is not supported and has no effect. "
+              "ARN uses the alternate screen in a console and plain output when input or output "
+              "is redirected. Remove the variable, or set it to alternate.");
+    }
+#endif
     arn::core::AgentSession session;
     session.set_system_instruction(arn::coding_prompt());
     const arn::ToolExecutor tools;
@@ -191,6 +216,9 @@ int run() {
     // Never query AgentSession from a streaming or confirmation callback:
     // prompt() owns the session mutex until the request finishes.
     const auto refresh = [&] {
+        // View keys read by the cancellation monitor during a request (POSIX
+        // and the Windows alternate screen; always empty for native Windows).
+        for (const auto& event : arn::take_deferred_view_events()) apply_view_event(ui, event);
         if (acp_session.active()) {
             const std::string display_model = model.empty() ? "auto" : model;
             ui.session("kiro", display_model, context_active);
@@ -545,5 +573,15 @@ int main(int argc, char** argv) {
             return arn::run_server();
         }
     }
-    return run();
+    // Unwind on any error: the renderer then leaves the alternate screen and
+    // prints the conversation, and the terminal settings are restored, before
+    // the error is reported.
+    try {
+        return run();
+    } catch (const std::exception& error) {
+        std::cerr << "arn: " << error.what() << '\n';
+    } catch (...) {
+        std::cerr << "arn: unexpected error\n";
+    }
+    return 1;
 }

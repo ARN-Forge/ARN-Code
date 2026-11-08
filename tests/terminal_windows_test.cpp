@@ -58,183 +58,20 @@ void confirmation(arn::TerminalSession& terminal, std::vector<INPUT_RECORD> even
           "Console confirmation introduced a submission delay");
 }
 
-class ConsoleOutput final : public std::streambuf {
-    HANDLE output_;
-    std::string emitted_;
-    std::streamsize xsputn(const char* data, std::streamsize size) override {
-        DWORD written{};
-        if (!WriteFile(output_, data, static_cast<DWORD>(size), &written, nullptr)) return 0;
-        emitted_.append(data, written);
-        return written;
-    }
-    int_type overflow(int_type value) override {
-        if (traits_type::eq_int_type(value, traits_type::eof())) return traits_type::not_eof(value);
-        const char byte = traits_type::to_char_type(value);
-        return xsputn(&byte, 1) == 1 ? value : traits_type::eof();
-    }
-public:
-    explicit ConsoleOutput(HANDLE output) : output_(output) {}
-    const std::string& emitted() const { return emitted_; }
-};
-
-void console_ui_smoke() {
-    const auto previous_output = GetStdHandle(STD_OUTPUT_HANDLE);
-    const auto output = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CONSOLE_TEXTMODE_BUFFER, nullptr);
-    check(output != INVALID_HANDLE_VALUE, "Could not allocate UI console buffer");
-    ConsoleOutput writer(output);
-    auto* previous_writer = std::cout.rdbuf(&writer);
-    SetStdHandle(STD_OUTPUT_HANDLE, output);
-    try {
-        SMALL_RECT window{0, 0, 79, 24};
-        check(SetConsoleWindowInfo(output, TRUE, &window), "Could not size console viewport");
-        check(SetConsoleScreenBufferSize(output, {100, 120}), "Could not size console history");
-        window = {0, 0, 99, 29};
-        check(SetConsoleWindowInfo(output, TRUE, &window), "Could not size UI viewport");
-        arn::TerminalSession terminal;
-        arn::terminal_ui::Ui ui(terminal);
-        ui.session("Gemini", "fake-model", false);
-        ui.status(ui.ready_status());
-        const auto line = [&](int row) {
-            CONSOLE_SCREEN_BUFFER_INFO info{};
-            check(GetConsoleScreenBufferInfo(output, &info), "Could not inspect rendered viewport");
-            std::wstring text(100, L' ');
-            DWORD count{};
-            const COORD position{0, static_cast<SHORT>(info.srWindow.Top + row)};
-            check(ReadConsoleOutputCharacterW(output, text.data(), 100, position, &count),
-                  "Could not read rendered UI");
-            return text;
-        };
-        const auto check_single_banner = [&](const char* stage) {
-            // Win32 VT output can scroll the visible region with srWindow.Top
-            // unchanged. ReadConsoleOutputCharacterW cannot inspect the host's
-            // external scrollback. Count actual writes, even after scrolling;
-            // terminal_ui_test separately verifies retained VT history.
-            const auto& emitted = writer.emitted();
-            const auto banner = emitted.find("ARN AGENT CODE");
-            if (banner == std::string::npos)
-                throw std::runtime_error(std::string("Real console did not emit startup banner: ") + stage);
-            if (emitted.find("ARN AGENT CODE", banner + 1) != std::string::npos)
-                throw std::runtime_error(std::string("Real console duplicated startup banner: ") + stage);
-        };
-        ui.render();
-        // Verify backend evidence against an actual Win32 screen buffer. Same
-        // geometry/coordinates alone must not certify externally changed cells.
-        {
-            const auto anchor = terminal.capture_live_anchor(1, 1);
-            check(terminal.live_anchor_valid(anchor), "Fresh Win32 anchor is invalid");
-            CONSOLE_SCREEN_BUFFER_INFO before{};
-            check(GetConsoleScreenBufferInfo(output, &before), "Could not inspect live anchor");
-            const auto relocated = COORD{0, static_cast<SHORT>(before.dwCursorPosition.Y - 1)};
-            check(SetConsoleCursorPosition(output, relocated), "Could not relocate console cursor");
-            check(!terminal.live_anchor_valid(anchor), "Win32 anchor ignored external cursor relocation");
-            check(SetConsoleCursorPosition(output, before.dwCursorPosition), "Could not restore test cursor");
-            check(terminal.live_anchor_valid(anchor), "Unchanged Win32 region lost its anchor");
-            wchar_t original{};
-            DWORD count{};
-            const COORD changed{0, before.dwCursorPosition.Y};
-            check(ReadConsoleOutputCharacterW(output, &original, 1, changed, &count),
-                  "Could not inspect live cell");
-            check(WriteConsoleOutputCharacterW(output, L"!", 1, changed, &count),
-                  "Could not change live cell");
-            check(!terminal.live_anchor_valid(anchor), "Win32 anchor ignored changed region contents");
-            check(WriteConsoleOutputCharacterW(output, &original, 1, changed, &count),
-                  "Could not restore test cell");
-        }
-        check(line(0).find(L'╭') != std::wstring::npos && line(8).find(L'╰') != std::wstring::npos,
-              "Real Windows console lost header borders");
-        check(line(3).find(L"▄▄          ▄▄") != std::wstring::npos,
-              "Real Windows console lost Arny");
-        check(line(7).find(L"Model: fake-model") != std::wstring::npos,
-              "Real Windows console lost session metadata");
-        check(line(27).find(L"arn › ") == 0 && line(28).find(L"Type /help") == 0,
-              "Real Windows console misplaced the input area");
-        ui.add(arn::terminal_ui::Tone::normal, {});
-        ui.append("Вітаю"); ui.render();
-        ui.append(" вас!"); ui.render();
-        check(line(10).find(L"Вітаю вас!") != std::wstring::npos,
-              "Real Windows console broke streamed text");
-        ui.status("Allow this tool call? [y/N]");
-        ui.show_confirmation("y");
-        check(line(27).find(L"arn › y") == 0 && line(28).find(L"[y/N]") != std::wstring::npos,
-              "Real Windows console did not display confirmation");
-        ui.show_confirmation({});
-        check(line(27).find(L"arn ›   ") == 0, "Real Windows console did not erase confirmation");
-        ui.finish_confirmation('\n');
-        ui.status(ui.ready_status()); ui.render();
-        check(line(10).find(L"Вітаю вас!") != std::wstring::npos,
-              "Real Windows console confirmation damaged conversation");
-        check_single_banner("streaming/confirmation");
-
-        // Exercise the production renderer against real console geometry and
-        // scrolling. The welcome block must never be appended again.
-        for (int turn = 0; turn < 35; ++turn) {
-            ui.session("OmniRoute", "fake-model-" + std::to_string(turn), true);
-            ui.add(arn::terminal_ui::Tone::user, "offline-turn-" + std::to_string(turn));
-            ui.render();
-            ui.render();
-            check_single_banner(("transcript growth turn " + std::to_string(turn)).c_str());
-        }
-        for (const auto size : {COORD{70, 24}, COORD{50, 18}, COORD{100, 30}}) {
-            CONSOLE_SCREEN_BUFFER_INFO info{};
-            check(GetConsoleScreenBufferInfo(output, &info), "Could not inspect resize position");
-            SMALL_RECT resized{0, info.srWindow.Top, static_cast<SHORT>(size.X - 1),
-                               static_cast<SHORT>(info.srWindow.Top + size.Y - 1)};
-            check(SetConsoleWindowInfo(output, TRUE, &resized), "Could not resize UI viewport");
-            ui.render(); ui.render();
-            check_single_banner("viewport resize");
-        }
-    } catch (...) {
-        std::cout.rdbuf(previous_writer);
-        SetStdHandle(STD_OUTPUT_HANDLE, previous_output);
-        CloseHandle(output);
-        throw;
-    }
-    std::cout.rdbuf(previous_writer);
-    SetStdHandle(STD_OUTPUT_HANDLE, previous_output);
-    CloseHandle(output);
-}
-
-void resize_records_without_size_change() {
-    // Hosts can repeat a buffer-size record without resizing. That must not
-    // invalidate the live region (abandoning its footer); a real change must.
-    const auto previous_output = GetStdHandle(STD_OUTPUT_HANDLE);
-    const auto output = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CONSOLE_TEXTMODE_BUFFER, nullptr);
-    check(output != INVALID_HANDLE_VALUE, "Could not allocate resize console buffer");
-    ConsoleOutput writer(output);
-    auto* previous_writer = std::cout.rdbuf(&writer);
-    SetStdHandle(STD_OUTPUT_HANDLE, output);
-    const auto restore = [&] {
-        std::cout.rdbuf(previous_writer);
-        SetStdHandle(STD_OUTPUT_HANDLE, previous_output);
-        CloseHandle(output);
-    };
-    try {
-        arn::TerminalSession terminal;
-        std::cout << "live-region-row" << std::flush;
-        const auto anchor = terminal.capture_live_anchor(0, 0);
-        check(terminal.live_anchor_valid(anchor), "Fresh resize-test anchor is invalid");
-        CONSOLE_SCREEN_BUFFER_INFO info{};
-        check(GetConsoleScreenBufferInfo(output, &info), "Could not inspect buffer size");
-        INPUT_RECORD resize{};
-        resize.EventType = WINDOW_BUFFER_SIZE_EVENT;
-        resize.Event.WindowBufferSizeEvent.dwSize = info.dwSize;
-        check(FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE)), "Could not clear setup events");
-        write({resize, resize});
-        for (int record = 0; record < 2; ++record)
-            check(terminal.read_event().type == T::resize, "Resize record was not delivered");
-        check(terminal.live_anchor_valid(anchor),
-              "A resize record with an unchanged buffer size invalidated the live region");
-        resize.Event.WindowBufferSizeEvent.dwSize.X = static_cast<SHORT>(info.dwSize.X - 1);
-        write({resize});
-        check(terminal.read_event().type == T::resize, "Changed resize record was not delivered");
-        check(!terminal.live_anchor_valid(anchor), "A buffer-size change did not invalidate the live region");
-    } catch (...) {
-        restore();
-        throw;
-    }
-    restore();
+void resize_records_are_delivered() {
+    // Hosts can repeat a buffer-size record without resizing. Every record,
+    // repeated or changed, reaches the renderer as a resize event.
+    arn::TerminalSession terminal;
+    INPUT_RECORD resize{};
+    resize.EventType = WINDOW_BUFFER_SIZE_EVENT;
+    resize.Event.WindowBufferSizeEvent.dwSize = {100, 30};
+    check(FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE)), "Could not clear setup events");
+    write({resize, resize});
+    for (int record = 0; record < 2; ++record)
+        check(terminal.read_event().type == T::resize, "Resize record was not delivered");
+    resize.Event.WindowBufferSizeEvent.dwSize.X = 99;
+    write({resize});
+    check(terminal.read_event().type == T::resize, "Changed resize record was not delivered");
 }
 
 void transcript_smoke(const char* executable) {
@@ -562,8 +399,25 @@ void transcript_smoke(const char* executable) {
         check(output.find("Привіт", after) != std::string::npos, "Real ARN lost Ukrainian input");
         type(L"/exit");
         check(WaitForSingleObject(process.hProcess, 3000) == WAIT_OBJECT_0, "ARN did not exit");
+        for (char buffer[4096];;) { // Everything ARN wrote, up to its exit.
+            DWORD count{};
+            if (!ReadFile(reader, buffer, sizeof(buffer), &count, nullptr) || count == 0) break;
+            output.append(buffer, count);
+        }
         check(output.find("1049h") == std::string::npos && output.find("\x1b[2J") == std::string::npos,
               "Real ARN still replaces terminal history");
+        // Plain output: colour only. Apart from the session's mouse-mode and
+        // cursor-visibility resets, no sequence may move the cursor, erase,
+        // save a position or switch screens.
+        for (auto at = output.find('\x1b'); at != std::string::npos; at = output.find('\x1b', at + 1)) {
+            auto end = at + 2;
+            while (end < output.size() && !(output[end] >= '@' && output[end] <= '~')) ++end;
+            const auto sequence = output.substr(at, end + 1 - at);
+            check(output.compare(at, 2, "\x1b[") == 0 && end < output.size() &&
+                      (output[end] == 'm' || sequence == "\x1b[?1000l" || sequence == "\x1b[?1006l" ||
+                       sequence == "\x1b[?25h"),
+                  ("Plain output contained a non-colour sequence: " + sequence.substr(1)).c_str());
+        }
         check(output.find("F2 copy mode") == std::string::npos, "Windows still advertises copy mode");
         check(output.find("XX") == std::string::npos, "Secure entry emitted plaintext");
         // Redirected stdout cannot be read back, so no live input area may be
@@ -614,6 +468,11 @@ void redirected_stdin_smoke(const char* executable) {
 }
 
 int main(int argc, char** argv) {
+    // These tests cover input, confirmations, credentials and ARN with
+    // redirected input or output (plain output); the alternate screen has its
+    // own test. A caller's ARN_TERMINAL_RENDERER would only add a warning
+    // entry, so it is removed for the ARN processes started here.
+    SetEnvironmentVariableW(L"ARN_TERMINAL_RENDERER", nullptr);
     // CTest generally has redirected stdin; allocate an isolated console.
     // No human interaction or visible window is required.
     FreeConsole();
@@ -640,7 +499,12 @@ int main(int argc, char** argv) {
             check(!(mode & ENABLE_MOUSE_INPUT), "ARN still owns the mouse");
             check(!(mode & (ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)), "Input must be explicitly rendered");
             check(mode & ENABLE_PROCESSED_INPUT, "Selection-aware Ctrl+C must remain processed");
-            check(terminal.native_scrollback() && !terminal.copy_mode(), "Native scrollback not active");
+            // Standard output here is the caller's (a pipe or a file under
+            // CTest): plain output, unless it is a console.
+            DWORD output_mode{};
+            const bool console_output = GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &output_mode) != FALSE;
+            check(terminal.native_scrollback() == !console_output && !terminal.copy_mode(),
+                  "Redirected output did not select plain output");
 
             check(FlushConsoleInputBuffer(console_input), "Could not clear console setup events");
             INPUT_RECORD resize{};
@@ -798,8 +662,7 @@ int main(int argc, char** argv) {
         check(GetConsoleCP() == original_cp && GetConsoleOutputCP() == original_output_cp,
               "Windows console code pages were not restored");
         check(captured.str().find("1049h") == std::string::npos, "Windows still enters alternate screen");
-        resize_records_without_size_change();
-        console_ui_smoke();
+        resize_records_are_delivered();
         if (argc > 1) {
             transcript_smoke(argv[1]);
             redirected_stdin_smoke(argv[1]);

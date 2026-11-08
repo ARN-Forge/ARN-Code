@@ -1,23 +1,31 @@
 #include "terminal_ui.hpp"
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 
-// The backend shim reads the same flushed screen as the renderer writes.
-// Protected transcript assertions remain independent of ownership snapshots.
+// A shim terminal session (size and presentation chosen by the test) and a
+// model screen that interprets what the renderer writes.
+// test_native: plain output (redirected input or output) when true, the
+// alternate-screen viewport when false.
 namespace {
 arn::TerminalSize test_size{100, 30};
 bool test_native = true;
-bool anchor_available = true;
-// Region read-back fails while new regions can still be appended, as with
-// redirected stdout or an unreadable console buffer.
-bool capture_fails = false;
-std::size_t capture_count{};
-struct Screen;
-Screen* backend_screen{};
-std::function<void()> sync_screen;
 void check(bool ok, const char* message) {
     if (!ok) throw std::runtime_error(message);
+}
+// Cells a host gives one UTF-8 scalar: two for CJK and emoji, otherwise one.
+int cell_width(std::string_view glyph) {
+    char32_t code = static_cast<unsigned char>(glyph[0]);
+    if (glyph.size() > 1) {
+        code &= 0xFFu >> (glyph.size() + 1);
+        for (std::size_t index = 1; index < glyph.size(); ++index)
+            code = (code << 6) | (static_cast<unsigned char>(glyph[index]) & 0x3Fu);
+    }
+    return (code >= 0x1100 && code <= 0x115F) || (code >= 0x2E80 && code <= 0xA4CF) ||
+           (code >= 0xAC00 && code <= 0xD7A3) || (code >= 0xF900 && code <= 0xFAFF) ||
+           (code >= 0xFF00 && code <= 0xFF60) || (code >= 0x1F300 && code <= 0x1FAFF) ? 2 : 1;
 }
 }
 namespace arn {
@@ -204,9 +212,22 @@ struct Screen {
             } else {
                 const auto count = std::min(arn::terminal_ui::char_bytes(
                     static_cast<unsigned char>(text[index])), text.size() - index);
-                owned_writes += rows[y].cells[x].committed != 0;
-                rows[y].cells[x] = {std::string(text.substr(index, count)), 0};
-                x = std::min(width - 1, x + 1);
+                std::string glyph(text.substr(index, count));
+                // A wide glyph occupies its cell plus an empty continuation
+                // cell, so joined text stays contiguous.
+                const int end = x + std::min(cell_width(glyph), width - x);
+                auto& cells = rows[y].cells;
+                const auto blank = [&](int at) {
+                    owned_writes += cells[at].committed != 0;
+                    cells[at] = {" ", 0};
+                };
+                // Overwriting either half of a wide glyph blanks the other half.
+                if (cells[x].text.empty() && x > 0) blank(x - 1);
+                if (end < width && cells[end].text.empty()) blank(end);
+                for (int cell = x; cell < end; ++cell) owned_writes += cells[cell].committed != 0;
+                cells[x] = {std::move(glyph), 0};
+                if (end - x == 2) cells[x + 1] = {"", 0};
+                x = std::min(width - 1, end);
                 index += count;
             }
         }
@@ -227,54 +248,6 @@ struct Screen {
 
 } // namespace
 
-namespace arn {
-struct TerminalLiveAnchor::State {
-    TerminalSize geometry;
-    std::uint64_t generation{};
-    int x{}, y{}, before{}, after{}, top{}, bottom{};
-    std::size_t history{};
-    std::vector<std::string> rows;
-};
-
-TerminalLiveAnchor TerminalSession::capture_live_anchor(int before, int after) const {
-    ++capture_count;
-    if (!anchor_available || capture_fails) return {};
-    if (sync_screen) sync_screen();
-    auto state = std::make_shared<TerminalLiveAnchor::State>();
-    state->geometry = test_size;
-    state->before = before; state->after = after;
-    // Byte-emission-only tests have no screen; their token checks geometry.
-    // Ownership, layout and streaming tests use the independently bound model.
-    if (backend_screen) {
-        const auto& screen = *backend_screen;
-        state->generation = screen.generation;
-        state->x = screen.x; state->y = screen.y;
-        state->history = screen.history.size();
-        state->top = std::max(0, screen.y - before);
-        state->bottom = std::min(screen.height - 1, screen.y + after);
-        for (int row = state->top; row <= state->bottom; ++row)
-            state->rows.push_back(screen.line(row));
-    }
-    return {std::move(state)};
-}
-
-bool TerminalSession::live_anchor_valid(const TerminalLiveAnchor& anchor) const {
-    if (!anchor.state) return false;
-    const auto current = capture_live_anchor(anchor.state->before, anchor.state->after);
-    if (!current.state) return false;
-    const auto& a = *anchor.state;
-    const auto& b = *current.state;
-    return a.geometry.width == b.geometry.width && a.geometry.height == b.geometry.height &&
-           a.generation == b.generation && a.x == b.x && a.y == b.y &&
-           a.history == b.history && a.top == b.top && a.bottom == b.bottom && a.rows == b.rows;
-}
-
-bool TerminalSession::begin_output_region() const {
-    if (!anchor_available) return false;
-    std::cout << "\x1b[" << test_size.height << ";1H\r\n" << std::flush;
-    return true;
-}
-} // namespace arn
 
 namespace {
 struct Capture {
@@ -282,10 +255,7 @@ struct Capture {
     std::streambuf* original{std::cout.rdbuf(output.rdbuf())};
     Screen* bound{};
     std::size_t consumed{};
-    void bind(Screen& screen) {
-        bound = backend_screen = &screen;
-        sync_screen = [this] { flush_screen(); };
-    }
+    void bind(Screen& screen) { bound = &screen; }
     void flush_screen() {
         if (!bound) return;
         const auto text = output.str();
@@ -294,14 +264,9 @@ struct Capture {
     }
     void unbind() {
         flush_screen();
-        bound = backend_screen = nullptr;
-        sync_screen = {};
+        bound = nullptr;
     }
-    ~Capture() {
-        sync_screen = {};
-        backend_screen = nullptr;
-        std::cout.rdbuf(original);
-    }
+    ~Capture() { std::cout.rdbuf(original); }
     std::string take() {
         flush_screen();
         auto text = output.str(); output.str({}); consumed = 0; return text;
@@ -314,120 +279,54 @@ std::size_t occurrences(std::string_view text, std::string_view token) {
     return count;
 }
 
+// Plain output may colour text, nothing else: no cursor movement, erasing,
+// saved positions or screen switches.
+bool only_colour_sequences(std::string_view bytes) {
+    for (auto at = bytes.find('\x1b'); at != std::string_view::npos; at = bytes.find('\x1b', at + 1)) {
+        if (at + 1 >= bytes.size() || bytes[at + 1] != '[') return false;
+        auto end = at + 2;
+        while (end < bytes.size() && !(bytes[end] >= '@' && bytes[end] <= '~')) ++end;
+        if (end >= bytes.size() || bytes[end] != 'm' || bytes[at + 2] == '?') return false;
+    }
+    return true;
+}
+
+// Plain output prints the startup banner as text lines; they match the
+// alternate-screen header row for row.
 void header_matches_existing_layout() {
     Capture capture;
     arn::TerminalSession terminal;
     for (const auto width : {100, 70, 50}) {
         test_size.width = width;
         test_native = false;
-        Ui original(terminal);
-        original.session("Gemini", "fake-model", false);
-        original.render();
+        Ui viewport(terminal);
+        viewport.session("Gemini", "fake-model", false);
+        viewport.render();
         Screen expected(width);
         expected.feed(capture.take());
 
         test_native = true;
-        Ui native(terminal);
-        native.session("Gemini", "fake-model", false);
-        native.status(native.ready_status());
+        Ui plain(terminal);
+        plain.session("Gemini", "fake-model", false);
+        plain.status(plain.ready_status());
         Screen actual(width);
         capture.bind(actual);
-        native.render();
+        plain.render();
         const auto output = capture.take();
         const int header = width - 4 < 58 ? 5 : width - 4 < 76 ? 7 : 9;
         for (int row = 0; row < header; ++row)
-            check(actual.line(row) == expected.line(row), "Windows header differs from original layout");
-        check(actual.line(26) == expected.line(26), "Input separator differs from original layout");
-        check(actual.line(27).find("arn › ") == 0, "Input area is missing");
-        check(actual.line(28).find("Type /help") == 0, "Footer hint is missing");
-        check(output.find("\x1b[2J") == std::string::npos, "Windows clears the viewport on refresh");
+            check(actual.line(row) == expected.line(row), "The plain banner differs from the viewport header");
+        check(actual.line(header).find_first_not_of(' ') == std::string::npos, "The gap below the banner is missing");
+        check(actual.line(header + 1).find("Type /help") == 0, "The prompt line does not follow the banner");
+        check(actual.all().find("arn › ") == std::string::npos, "Plain output drew an input area");
+        check(only_colour_sequences(output), "Plain output used more than colour sequences");
         capture.unbind();
     }
     test_size = {100, 30};
 }
 
-void streaming_input_and_history() {
-    Capture capture;
-    arn::TerminalSession terminal;
-    Ui ui(terminal);
-    Screen screen;
-    capture.bind(screen);
-    std::string emitted;
-    const auto draw = [&] {
-        const auto output = capture.take();
-        emitted += output;
-        return output;
-    };
-    ui.session("Gemini", "fake-model", false);
-    ui.status(ui.ready_status());
-    ui.render(); draw();
-    check(screen.line(3).find("▄▄          ▄▄") != std::string::npos, "Arny is missing");
-    check(screen.line(7).find("Context: empty") != std::string::npos, "Session row is missing");
-    ui.add(Tone::normal, {});
-    ui.status("Working · Esc or Ctrl+C cancels");
-    ui.append("Вітаю"); ui.render(); draw();
-    ui.append(" вас!"); ui.render();
-    const auto delta = draw();
-    check(delta.find("Вітаю") == std::string::npos, "Streaming replays committed text");
-    check(screen.line(10).find("Вітаю вас!") != std::string::npos, "Streaming broke a conversation line");
-    check(screen.line(28).find("Ctrl+C cancels") != std::string::npos, "Busy footer disappeared");
-    ui.session("Gemini", "short", true);
-    ui.status(ui.ready_status()); ui.render(); draw();
-    check(screen.line(7).find("Model: short · Context: active") != std::string::npos,
-          "Header metadata did not update in place");
-    check(screen.line(7).find("fake-model") == std::string::npos, "Old model text was retained");
-    ui.hint("Enter submits · Esc cancels");
-    ui.input("*****"); ui.render_input(); draw();
-    check(screen.line(27).find("arn › *****") == 0, "Masked input area disappeared");
-    ui.input("****"); ui.render_input(); draw();
-    check(screen.line(27).find("arn › **** ") == 0, "Backspace left a stale masking character");
-    ui.hint({}); ui.input({});
-    ui.status("Allow this tool call? [y/N]");
-    ui.show_confirmation({}); draw();
-    ui.show_confirmation("y"); draw();
-    check(screen.line(27).find("arn › y") == 0, "Confirmation choice is not visible");
-    check(screen.line(28).find("[y/N]") != std::string::npos, "Confirmation prompt is missing");
-    ui.show_confirmation({}); draw();
-    check(screen.line(27).find("arn ›   ") == 0, "Confirmation Backspace did not erase the choice");
-    ui.show_confirmation("n"); ui.finish_confirmation('n'); draw();
-    ui.status(ui.ready_status()); ui.render(); draw();
-    check(screen.line(10).find("Вітаю вас!") != std::string::npos, "Confirmation damaged conversation");
-
-    for (int line = 0; line < 60; ++line) {
-        ui.append("\nstream-row-" + std::to_string(line) + "!");
-        ui.render(); draw();
-    }
-    ui.session("Gemini", "short", false); ui.render(); draw();
-    auto history = screen.all();
-    check(occurrences(history, "Вітаю вас!") == 1, "Conversation was lost or duplicated in scrollback");
-    for (int line = 0; line < 60; ++line)
-        check(occurrences(history, "stream-row-" + std::to_string(line) + "!") == 1,
-              "Streamed row was lost or replayed");
-    check(!screen.history.empty(), "Output did not enter native history");
-    ui.add(Tone::user, "arn › next turn"); ui.render(); draw();
-    check(occurrences(screen.all(), "ARN AGENT CODE") == 1,
-          "The next turn duplicated the startup block in history");
-    check(screen.all().find("stream-row-59!") != std::string::npos,
-          "New frame erased the previous response");
-    for (int line = 0; line < 200; ++line) {
-        ui.add(Tone::muted, "history-entry-" + std::to_string(line) + "!");
-        ui.render(); draw();
-    }
-    history = screen.all();
-    for (int line = 0; line < 200; ++line)
-        check(occurrences(history, "history-entry-" + std::to_string(line) + "!") == 1,
-              "Pruning internal log lost or duplicated native history");
-    test_size.width = 70;
-    screen.resize(70);
-    ui.render(); draw();
-    check(occurrences(screen.all(), "ARN AGENT CODE") == 1,
-          "Resize duplicated the startup block in history");
-    ui.input("Після resize"); ui.render_input(); draw();
-    check(screen.line(screen.y).find("Після resize") != std::string::npos, "Input broke after resize");
-    for (const auto forbidden : {"\x1b[2J", "\x1b[3J", "1049h", "1000h", "1006h", "F2 copy mode"})
-        check(emitted.find(forbidden) == std::string::npos, "Native renderer captured mouse/history or advertised F2");
-}
-
+// Plain output prints the banner once and every entry once, however often it
+// renders, resizes, confirms or clears. The viewport keeps a single header.
 void startup_is_not_a_redraw_frame() {
     Capture capture;
     arn::TerminalSession terminal;
@@ -491,320 +390,13 @@ void startup_is_not_a_redraw_frame() {
     test_native = true;
     test_size = {100, 30};
 }
-struct NativeFixture {
-    Capture capture;
-    arn::TerminalSession terminal;
-    Ui ui{terminal};
-    Screen screen;
-    std::string emitted;
-    NativeFixture() {
-        capture.bind(screen);
-        test_native = true;
-        test_size = {100, 30};
-        ui.session("Gemini", "fake-model", false);
-        ui.status(ui.ready_status());
-        ui.render();
-        draw();
-    }
-    std::string draw() {
-        auto output = capture.take();
-        emitted += output;
-        return output;
-    }
-    void turns(int count) {
-        for (int turn = 0; turn < count; ++turn) {
-            ui.add(Tone::user, "owner-user-" + std::to_string(turn) + "!");
-            ui.add(Tone::normal, "owner-reply-" + std::to_string(turn) + "!");
-            ui.render();
-            draw();
-        }
-        screen.protect("ARN AGENT CODE");
-        for (int turn = 0; turn < count; ++turn) {
-            screen.protect("owner-user-" + std::to_string(turn) + "!");
-            screen.protect("owner-reply-" + std::to_string(turn) + "!");
-        }
-    }
-    void resize(arn::TerminalSize size) {
-        screen.resize(size.width, size.height);
-        test_size = size;
-        check(screen.committed_intact(), "Host resize itself damaged committed cells");
-    }
-    void check_history() const {
-        if (screen.owned_writes || !screen.committed_intact())
-            throw std::runtime_error("Renderer wrote/erased committed transcript cells: " +
-                                     std::to_string(screen.owned_writes));
-        check(screen.stale_restores == 0, "Renderer restored an invalid saved cursor");
-    }
-};
-
-void model_reflow_preserves_ownership() {
-    Screen screen(12, 6);
-    screen.feed("history-a\r\nhistory-b\r\nlive");
-    screen.protect("history-a");
-    screen.protect("history-b");
-    screen.feed("\x1b[s");
-    screen.resize(6, 3);
-    check(!screen.history.empty(), "Height/width shrink did not move rows to history");
-    check(screen.committed_intact(), "Model shrink dropped protected cells");
-    screen.resize(24, 9);
-    check(screen.committed_intact(), "Model grow dropped protected cells");
-    check(occurrences(screen.all(), "history-a") == 1 &&
-          occurrences(screen.all(), "history-b") == 1,
-          "Model reflow split/join lost or duplicated logical history");
-    const auto x = screen.x, y = screen.y;
-    screen.feed("\x1b[u");
-    check(screen.stale_restores == 1 && screen.x == x && screen.y == y,
-          "Model silently trusted a cursor saved before resize");
-    screen.host_cursor(screen.visible_row("history-b"), 0);
-    screen.feed("\x1b[2K");
-    check(screen.owned_writes > 0 && !screen.committed_intact(),
-          "Ownership oracle failed to detect destructive history cleanup");
-}
-
-void geometry_redraw_preserves_transcript() {
-    NativeFixture fixture;
-    fixture.turns(40);
-    for (int cycle = 0; cycle < 3; ++cycle) {
-        for (const auto size : {arn::TerminalSize{70, 30}, {120, 30}, {100, 16},
-                                {100, 45}, {42, 13}, {100, 30}}) {
-            fixture.resize(size);
-            fixture.ui.render(); fixture.draw();
-            fixture.ui.render_input(); fixture.draw();
-            fixture.ui.render(); fixture.draw();
-            fixture.check_history();
-        }
-    }
-    check(occurrences(fixture.emitted, "ARN AGENT CODE") == 1,
-          "Geometry redraw emitted another startup block");
-    for (int turn = 0; turn < 40; ++turn) {
-        check(occurrences(fixture.emitted, "owner-user-" + std::to_string(turn) + "!") == 1,
-              "Geometry-only redraw appended historical user output");
-        check(occurrences(fixture.emitted, "owner-reply-" + std::to_string(turn) + "!") == 1,
-              "Geometry-only redraw appended historical assistant output");
-    }
-    for (const auto forbidden : {"1049h", "1000h", "1006h", "\x1b[3J", "\x1b[2J"})
-        check(fixture.emitted.find(forbidden) == std::string::npos,
-              "Native ownership redraw captured the mouse or cleared history");
-}
-
-void input_survives_width_and_height_resize() {
-    NativeFixture fixture;
-    const std::string input = "Привіт: незавершений ввід збережено INPUT_SENTINEL";
-    fixture.ui.input(input); // Deliberately never re-supplied after resize.
-    fixture.ui.render_input(); fixture.draw();
-    for (int cycle = 0; cycle < 3; ++cycle) {
-        for (const auto size : {arn::TerminalSize{40, 16}, {100, 45}, {70, 13},
-                                {120, 30}, {100, 30}}) {
-            fixture.resize(size);
-            fixture.ui.render(); fixture.draw();
-            fixture.ui.render_input();
-            const auto output = fixture.draw();
-            if (size.width >= 100)
-                check(output.find(input) != std::string::npos,
-                      "Resize mutated the logical non-empty UTF-8 input buffer");
-        }
-    }
-    check(occurrences(fixture.emitted, "ARN AGENT CODE") == 1,
-          "Input resize redrew startup output");
-    // Ui/read_line currently support an end-of-buffer cursor only. This test
-    // does not pretend to exercise a nonexistent mid-buffer editor API.
-}
-
-void streaming_resize_keeps_committed_prefix() {
-    NativeFixture fixture;
-    fixture.ui.add(Tone::normal, {});
-    fixture.ui.append("STREAM_PREFIX_Привіт");
-    fixture.ui.render(); fixture.draw();
-    fixture.screen.protect("STREAM_PREFIX_Привіт");
-    for (const auto size : {arn::TerminalSize{60, 17}, {110, 42}, {100, 30}}) {
-        fixture.resize(size);
-        fixture.ui.render(); fixture.draw();
-        fixture.check_history();
-    }
-    fixture.ui.append("_STREAM_SUFFIX");
-    fixture.ui.render(); fixture.draw();
-    fixture.ui.render(); fixture.draw();
-    fixture.check_history();
-    check(occurrences(fixture.emitted, "STREAM_PREFIX_Привіт") == 1 &&
-          occurrences(fixture.emitted, "_STREAM_SUFFIX") == 1,
-          "Resize replayed or omitted a streaming delta");
-}
-
-enum class Redraw { transcript, input, confirmation, finish_confirmation };
-
-void anchor_evidence_is_not_just_geometry() {
-    {
-        NativeFixture fixture;
-        const auto anchor = fixture.terminal.capture_live_anchor(1, 1);
-        check(fixture.terminal.live_anchor_valid(anchor), "Fresh live anchor is invalid");
-        // Host changes a live cell, keeping both cursor and geometry identical.
-        fixture.screen.rows[fixture.screen.y].cells[0].text = "!";
-        check(!fixture.terminal.live_anchor_valid(anchor),
-              "Anchor trusted changed contents at the same cursor/geometry");
-        fixture.ui.render_input(); fixture.draw();
-        check(fixture.screen.line(fixture.screen.y).starts_with("arn › "),
-              "Invalidated content did not establish a new input area");
-    }
-    {
-        NativeFixture fixture;
-        const auto anchor = fixture.terminal.capture_live_anchor(1, 1);
-        fixture.resize({70, 20});
-        fixture.resize({100, 30});
-        check(!fixture.terminal.live_anchor_valid(anchor),
-              "Returning to old geometry resurrected an earlier generation");
-        fixture.ui.input("Збережений ввід");
-        fixture.ui.render_input(); fixture.draw();
-        check(fixture.screen.line(fixture.screen.y).find("Збережений ввід") != std::string::npos,
-              "Generation invalidation lost logical input");
-    }
-}
-
-void same_geometry_host_relocation(Redraw path) {
-    NativeFixture fixture;
-    fixture.turns(12);
-    if (path == Redraw::confirmation || path == Redraw::finish_confirmation) {
-        fixture.ui.status("Allow this tool call? [y/N]");
-        fixture.ui.show_confirmation("y"); fixture.draw();
-    }
-    fixture.screen.host_cursor(fixture.screen.visible_row("owner-reply-11!"), 20);
-    switch (path) {
-    case Redraw::transcript: fixture.ui.render(); break;
-    case Redraw::input: fixture.ui.render_input(); break;
-    case Redraw::confirmation: fixture.ui.show_confirmation({}); break;
-    case Redraw::finish_confirmation: fixture.ui.finish_confirmation('n'); break;
-    }
-    fixture.draw();
-    fixture.check_history();
-}
-
-void new_live_frame_follows_geometry() {
-    NativeFixture fixture;
-    fixture.turns(12);
-    fixture.ui.input("Привіт INPUT_SENTINEL");
-    for (const auto size : {arn::TerminalSize{64, 17}, {110, 40}, {70, 22}, {100, 30}}) {
-        fixture.resize(size);
-        fixture.ui.render_input(); fixture.draw();
-        fixture.check_history();
-        check(fixture.screen.line(fixture.screen.y - 1).starts_with(
-                  arn::terminal_ui::horizontal_rule(static_cast<std::size_t>(size.width - 2))),
-              "Reanchored frame retained the old width");
-        check(fixture.screen.line(fixture.screen.y).find("Привіт INPUT_SENTINEL") != std::string::npos,
-              "Reanchored frame lost input");
-    }
-}
-
-void unavailable_anchor_retries_without_mutation() {
-    NativeFixture fixture;
-    fixture.turns(12);
-    fixture.ui.input("Збережений INPUT_SENTINEL");
-    fixture.screen.host_cursor(fixture.screen.visible_row("owner-reply-11!"), 20);
-    anchor_available = false;
-    fixture.ui.render_input();
-    check(fixture.draw().empty(), "Unavailable anchor still mutated terminal cells");
-    fixture.ui.render();
-    check(fixture.draw().empty(), "Retry with unavailable anchor wrote unowned cells");
-    fixture.check_history();
-    anchor_available = true;
-    fixture.ui.render(); fixture.draw();
-    fixture.check_history();
-    check(fixture.screen.line(fixture.screen.y).find("Збережений INPUT_SENTINEL") != std::string::npos,
-          "Recovered anchor did not redraw preserved input");
-}
-
-void stale_footer_after_host_relocation(Redraw path) {
-    NativeFixture fixture;
-    fixture.turns(12);
-    if (path == Redraw::confirmation || path == Redraw::finish_confirmation) {
-        fixture.ui.status("Allow this tool call? [y/N]");
-        fixture.ui.show_confirmation("y");
-        fixture.draw();
-        fixture.check_history();
-    }
-    fixture.resize({64, 17});
-    // Geometry alone cannot promise where a host has placed the cursor.
-    // Preserve every historical cell, then explicitly exercise a different,
-    // valid cursor location. This is a contract counterexample, not an
-    // assertion that Windows Terminal always makes this particular move.
-    fixture.screen.host_cursor(fixture.screen.visible_row("owner-reply-11!"), 20);
-    check(fixture.screen.committed_intact(), "Cursor relocation changed history");
-    switch (path) {
-    case Redraw::transcript: fixture.ui.render(); break;
-    case Redraw::input: fixture.ui.render_input(); break;
-    case Redraw::confirmation: fixture.ui.show_confirmation({}); break;
-    case Redraw::finish_confirmation: fixture.ui.finish_confirmation('n'); break;
-    }
-    fixture.draw();
-    fixture.check_history();
-}
-
-// Test-only one-row adapter: intentionally not installed in the production Ui.
-// It evaluates the existing backend contract without a separator or hint row.
-// A refused edit is evidence of infeasibility, not a resize-redraw solution.
-struct InlineOwnershipProbe {
-    arn::TerminalSession& terminal;
-    std::string prompt, logical;
-    arn::TerminalLiveAnchor anchor;
-    void begin() {
-        std::cout << prompt << logical << std::flush;
-        anchor = terminal.capture_live_anchor(0, 0);
-    }
-    bool edit(std::string value) {
-        logical = std::move(value);
-        if (!terminal.live_anchor_valid(anchor)) return false;
-        std::cout << "\r\x1b[2K" << prompt << logical << std::flush;
-        anchor = terminal.capture_live_anchor(0, 0);
-        return true;
-    }
-};
-
-void inline_probe_requires_current_ownership(bool confirmation) {
-    Capture capture;
-    arn::TerminalSession terminal;
-    Screen screen;
-    capture.bind(screen);
-    std::cout << "inline-transcript!\r\n";
-    capture.take();
-    screen.protect("inline-transcript!");
-    InlineOwnershipProbe probe{terminal, confirmation ? "Allow? [y/N] " : "arn › ", {}};
-    probe.begin(); capture.take();
-    check(probe.edit(confirmation ? "y" : "Привіт"), "One-row edit failed at stable geometry");
-    capture.take();
-    check(probe.edit({}), "One-row Backspace display failed at stable geometry");
-    capture.take();
-    const auto emitted_before = screen.all();
-    for (const auto size : {arn::TerminalSize{64,17}, {120,45}, {100,30},
-                            {90,27}, {80,24}, {100,30}}) {
-        screen.resize(size.width, size.height); test_size = size;
-        check(!probe.edit(confirmation ? "n" : "Збережений ввід"),
-              "One-row adapter guessed ownership after geometry invalidation");
-        check(capture.take().empty(), "Refused one-row edit emitted destructive output");
-        check(probe.logical == (confirmation ? "n" : "Збережений ввід"),
-              "Refused display mutation must still retain logical state");
-        check(screen.committed_intact() && screen.owned_writes == 0,
-              "One-row adapter corrupted adjacent transcript");
-    }
-    check(occurrences(screen.all(), confirmation ? "Allow? [y/N] " : "arn › ") == 1,
-          "Probe allocated another historical input on resize");
-    // No stacking here is achieved by REFUSING all post-resize edits. That
-    // cannot satisfy the future classic editor's continued-editing requirement.
-    check(!emitted_before.empty(), "Probe did not establish an initial line");
-    // Make the protected row visible in the model for a separate relocation
-    // counterexample. This does not prescribe Windows Terminal's policy.
-    screen.resize(100, 100); test_size = {100, 100};
-    screen.host_cursor(screen.visible_row("inline-transcript!"), 5);
-    check(!probe.edit("n"), "One-row adapter accepted a relocated transcript cursor");
-    check(capture.take().empty() && screen.committed_intact(),
-          "One-row prompt bypassed protected-transcript ownership");
-}
-
-// A byte sink (redirected stdout) never certifies a region. Output must stay
-// append-only and bounded: no live footer, nothing per keystroke.
+// Redirected input or output gets plain output: append-only and bounded, no
+// live input area, nothing per keystroke.
 void redirected_output_is_plain_and_bounded() {
     Capture capture;
     arn::TerminalSession terminal;
     Screen screen;
     capture.bind(screen);
-    capture_fails = true;
     Ui ui(terminal);
     ui.session("Gemini", "fake-model", false);
     ui.status(ui.ready_status());
@@ -847,138 +439,383 @@ void redirected_output_is_plain_and_bounded() {
     check(occurrences(all, "arn › ") == 1 &&
           all.find(arn::terminal_ui::horizontal_rule(98)) == std::string::npos,
           "Plain output drew a live input area");
-    for (const auto movement : {"\x1b[1A", "\x1b[1B", "\x1b[2K"})
-        check(emitted.find(movement, emitted.find("Type /help")) == std::string::npos,
-              "Plain output moved the cursor or erased a row");
-    capture_fails = false;
+    // From the banner on, nothing moves the cursor or erases a row.
+    check(only_colour_sequences(emitted), "Plain output moved the cursor or erased a row");
+    // /clear cannot erase plain output; later entries simply follow.
+    ui.add(Tone::normal, "before-clear!");
+    ui.render();
+    ui.clear();
+    ui.add(Tone::normal, "after-clear!");
+    ui.render();
+    const auto cleared = capture.take();
+    check(only_colour_sequences(cleared) && cleared.find("after-clear!") != std::string::npos &&
+              cleared.find("ARN AGENT CODE") == std::string::npos,
+          "/clear in plain output erased output or replayed the banner");
+    check(occurrences(screen.all(), "before-clear!") == 1, "/clear in plain output removed printed text");
 }
 
-// A console whose region cannot be read back after a footer exists: one
-// re-anchor is allowed, then output becomes plain instead of stacking footers.
-void capture_failure_falls_back_once() {
-    NativeFixture fixture;
-    fixture.turns(12);
-    fixture.ui.input("draft");
-    fixture.ui.render_input(); fixture.draw();
-    capture_fails = true;
-    fixture.ui.render_input(); fixture.draw();
-    for (int key = 0; key < 50; ++key) {
-        fixture.ui.input("draft" + std::string(static_cast<std::size_t>(key), 'x'));
-        fixture.ui.render_input();
-        check(fixture.draw().empty(), "Failed capture still redrew the input area per keystroke");
+// Plain output never moves the cursor, so streamed wide text is written as
+// it arrives and never needs to be resumed at a column.
+void plain_output_never_moves_cursor() {
+    Capture capture;
+    arn::TerminalSession terminal;
+    Screen screen;
+    capture.bind(screen);
+    Ui ui(terminal);
+    ui.status(ui.ready_status());
+    ui.render();
+    ui.add(Tone::normal, {});
+    for (const auto chunk : {"你好", "世界", "🙂", "Привіт"}) {
+        ui.append(chunk); ui.render();
     }
-    fixture.ui.input({});
-    fixture.ui.add(Tone::normal, {});
-    for (int chunk = 0; chunk < 20; ++chunk) {
-        fixture.ui.append("streamed-" + std::to_string(chunk) + ' ');
-        fixture.ui.render(); fixture.draw();
+    const auto emitted = capture.take();
+    check(only_colour_sequences(emitted), "Plain output moved the cursor");
+    check(occurrences(screen.all(), "你好世界🙂Привіт") == 1, "Plain output split wide text");
+}
+
+}
+
+// --- POSIX alternate-screen viewport (native_scrollback() == false) -----
+
+std::string trimmed(std::string text) {
+    while (!text.empty() && text.back() == ' ') text.pop_back();
+    return text;
+}
+
+// A POSIX Ui on a model screen without scrollback, like an alternate screen.
+// Rows (0-based) for width 100: header 0..8, transcript 10..height-5, rule
+// height-4, prompt height-3, hint height-2, the last row empty.
+struct ViewportFixture {
+    Capture capture;
+    arn::TerminalSession terminal;
+    Screen screen;
+    std::optional<Ui> ui;
+    std::string emitted, entered;
+    explicit ViewportFixture(int width = 100, int height = 30) : screen(width, height, false) {
+        test_native = false;
+        test_size = {width, height};
+        ui.emplace(terminal);
+        entered = capture.take(); // Entering the alternate screen; frames come after.
+        screen.feed(entered);
     }
-    fixture.ui.status("Allow file change? [y/N]");
-    fixture.ui.show_confirmation("y"); fixture.draw();
-    fixture.ui.finish_confirmation('y');
-    fixture.ui.render(); fixture.draw();
-    fixture.check_history();
-    const auto all = fixture.screen.all();
-    const auto rule = arn::terminal_ui::horizontal_rule(98);
-    check(occurrences(all, rule) == 1 && occurrences(all, "arn › draft") == 1,
-          "Failed capture stacked additional input areas");
-    check(occurrences(all, "streamed-19 ") == 1 && occurrences(all, "Allow file change? [y/N]") == 2,
-          "Plain fallback lost streamed text or the confirmation prompt");
-    capture_fails = false;
-}
-
-// Setup failure must not show a y/N prompt without the change preview; the
-// preview is flushed first once a region can be established again.
-void confirmation_retries_preview_after_failed_setup() {
-    NativeFixture fixture;
-    fixture.turns(12);
-    fixture.ui.add(Tone::normal, "PREVIEW_SENTINEL!");
-    fixture.ui.status("Allow file change? [y/N]");
-    anchor_available = false;
-    fixture.ui.show_confirmation({});
-    fixture.ui.show_confirmation("y");
-    check(fixture.draw().empty(), "Failed setup wrote unowned cells");
-    anchor_available = true;
-    fixture.ui.show_confirmation("y"); fixture.draw();
-    fixture.check_history();
-    const auto all = fixture.screen.all();
-    check(occurrences(all, "PREVIEW_SENTINEL!") == 1, "Confirmation lost its change preview");
-    check(fixture.screen.line(fixture.screen.y).starts_with("arn › y") &&
-          fixture.screen.line(fixture.screen.y + 1).find("[y/N]") != std::string::npos,
-          "Recovered confirmation prompt is not usable");
-    check(all.find("PREVIEW_SENTINEL!") < all.find("Allow file change? [y/N]"),
-          "Confirmation prompt appeared before its preview");
-}
-
-// Each frame verifies the region once and certifies it once.
-void frames_read_region_twice() {
-    NativeFixture fixture;
-    fixture.turns(3);
-    fixture.ui.add(Tone::normal, {});
-    fixture.ui.append("start"); fixture.ui.render(); fixture.draw();
-    for (int chunk = 0; chunk < 10; ++chunk) {
-        capture_count = 0;
-        fixture.ui.append(" chunk"); fixture.ui.render(); fixture.draw();
-        check(capture_count == 2, "A streamed chunk read the live region more than twice");
-        capture_count = 0;
-        fixture.ui.input("x"); fixture.ui.render_input(); fixture.draw();
-        check(capture_count == 2, "A keystroke read the live region more than twice");
+    std::string paint() {
+        ui->render();
+        auto output = capture.take();
+        screen.feed(output);
+        emitted += output;
+        return output;
     }
-    fixture.check_history();
-}
-
-// read_line handles a host resize record with render(). When geometry did not
-// actually change, the existing footer must be updated in place.
-void same_geometry_resize_render_keeps_one_footer() {
-    NativeFixture fixture;
-    fixture.turns(3);
-    fixture.ui.input("resize-draft");
-    fixture.ui.render_input(); fixture.draw();
-    for (int event = 0; event < 20; ++event) {
-        fixture.ui.render();
-        check(fixture.draw().find("\x1b[30;1H\r\n") == std::string::npos,
-              "Unchanged geometry allocated a new output region");
+    void resize(int width, int height) {
+        test_size = {width, height};
+        screen.resize(width, height);
     }
-    fixture.check_history();
-    check(occurrences(fixture.screen.all(), "arn › resize-draft") == 1,
-          "Unchanged geometry left an abandoned footer");
+    int header() const { const int inner = screen.width - 4; return inner < 58 ? 5 : inner < 76 ? 7 : 9; }
+    std::vector<std::string> transcript() const {
+        std::vector<std::string> rows;
+        for (int row = header() + 1; row <= screen.height - 5; ++row) rows.push_back(trimmed(screen.line(row)));
+        return rows;
+    }
+    std::string row(int index) const { return trimmed(screen.line(index)); }
+    std::string prompt() const { return row(screen.height - 3); }
+    std::string hint() const { return row(screen.height - 2); }
+    // What finish() printed after leaving the alternate screen.
+    std::string finish() {
+        ui->finish();
+        const auto output = capture.take();
+        const auto leave = output.find("\x1b[?1049l");
+        check(leave != std::string::npos, "finish() did not leave the alternate screen");
+        return output.substr(leave + 8);
+    }
+};
+
+bool valid_utf8(std::string_view text) {
+    for (std::size_t index = 0; index < text.size();) {
+        const auto scalar = arn::tui::decode(text, index);
+        if (scalar.code == 0xFFFD && text.substr(index, 3) != "\xEF\xBF\xBD") return false;
+        index += scalar.size;
+    }
+    return true;
 }
 
+void viewport_lifecycle_prints_once() {
+    {
+        // Windows' native Ui neither switches screens nor prints on exit.
+        Capture capture;
+        arn::TerminalSession terminal;
+        test_native = true;
+        { Ui native(terminal); native.add(Tone::normal, "native-entry!"); }
+        check(capture.take().empty(), "Native Ui emitted output on construction or destruction");
+    }
+    std::string printed;
+    {
+        ViewportFixture fixture;
+        check(occurrences(fixture.entered, "\x1b[?1049h") == 1, "Viewport did not enter the alternate screen once");
+        fixture.ui->session("Gemini", "fake-model", true);
+        fixture.ui->add(Tone::user, "arn › first question");
+        fixture.ui->add(Tone::normal, {});
+        fixture.ui->append("first answer\nsecond line");
+        fixture.ui->add(Tone::muted, "Done.");
+        fixture.ui->status("Arnie is working… Esc or Ctrl+C cancels");
+        fixture.ui->hint("secret-hint-text");
+        fixture.ui->input("*****");
+        fixture.paint();
+        printed = fixture.finish();
+        fixture.ui->finish();
+        fixture.ui->render();
+        fixture.ui->render_input();
+        check(fixture.capture.take().empty(), "Output after finish()");
+        fixture.ui.reset();
+        check(fixture.capture.take().empty(), "Destruction after finish() printed again");
+    }
+    for (const auto token : {"arn › first question", "first answer", "second line", "Done."})
+        check(occurrences(printed, token) == 1, "Transcript entry not printed exactly once");
+    check(printed.find("first answer") > printed.find("first question") &&
+              printed.find("Done.") > printed.find("second line"),
+          "Transcript order differs from the conversation");
+    for (const auto absent : {"ARN AGENT CODE", "Arnie is working", "secret-hint-text", "*****", "Type /help", "─"})
+        check(printed.find(absent) == std::string::npos, "Transcript contains frame, status, hint or draft text");
+    check(printed.find("\x1b[?") == std::string::npos && printed.find('\r') == std::string::npos,
+          "Transcript must be plain lines for scrollback");
+
+    // Destruction alone (any exit path that unwinds) prints once too.
+    {
+        Capture capture;
+        arn::TerminalSession terminal;
+        test_native = false;
+        { Ui ui(terminal); ui.add(Tone::normal, "only-on-destruction!"); }
+        const auto output = capture.take();
+        check(occurrences(output, "\x1b[?1049l") == 1 && occurrences(output, "only-on-destruction!") == 1,
+              "Destruction did not leave the viewport and print once");
+    }
+}
+
+void viewport_exception_unwinds_once() {
+    Capture capture;
+    arn::TerminalSession terminal;
+    test_native = false;
+    try {
+        Ui ui(terminal);
+        ui.add(Tone::normal, "before-the-error!");
+        ui.render();
+        throw std::runtime_error("simulated failure");
+    } catch (const std::runtime_error&) {
+    }
+    const auto output = capture.take();
+    const auto leave = output.find("\x1b[?1049l");
+    check(leave != std::string::npos && occurrences(output, "\x1b[?1049l") == 1,
+          "An exception did not leave the alternate screen exactly once");
+    check(occurrences(output.substr(leave), "before-the-error!") == 1, "An exception lost the transcript");
+}
+
+void viewport_keeps_six_tones() {
+    ViewportFixture fixture;
+    const std::pair<Tone, std::string_view> tones[] = {
+        {Tone::normal, arn::terminal_ui::reset}, {Tone::user, arn::terminal_ui::cyan},
+        {Tone::muted, arn::terminal_ui::dim}, {Tone::good, arn::terminal_ui::green},
+        {Tone::warning, arn::terminal_ui::amber}, {Tone::error, arn::terminal_ui::red}};
+    int index = 0;
+    for (const auto& [tone, code] : tones) fixture.ui->add(tone, "tone-text-" + std::to_string(index++) + "!");
+    const auto frame = fixture.paint();
+    index = 0;
+    for (const auto& [tone, code] : tones) {
+        const auto text = "tone-text-" + std::to_string(index++) + "!";
+        check(frame.find(std::string(code) + text) != std::string::npos, "A frame row lost its tone");
+        check(occurrences(frame, text) == 1, "A frame painted an entry twice");
+    }
+    const auto printed = fixture.finish();
+    index = 0;
+    for (const auto& [tone, code] : tones) {
+        const auto text = "tone-text-" + std::to_string(index++) + "!";
+        check(printed.find(std::string(code) + ' ' + text) != std::string::npos, "The transcript lost a tone");
+    }
+}
+
+void viewport_streaming_holds_split_utf8() {
+    ViewportFixture fixture;
+    fixture.ui->add(Tone::user, "arn › hi");
+    fixture.ui->add(Tone::normal, {});
+    const std::string reply = "Привіт 你好 🙂 ok";
+    for (std::size_t byte = 0; byte < reply.size(); ++byte) {
+        fixture.ui->append(reply.substr(byte, 1));
+        const auto frame = fixture.paint();
+        check(valid_utf8(frame), "A frame showed a split UTF-8 character");
+        check(frame.find('\n') == std::string::npos && frame.find('\r') == std::string::npos,
+              "A viewport frame contains a line break");
+        const auto line = fixture.row(fixture.header() + 2);
+        check(line.empty() || reply.starts_with(line.substr(1)),
+              "Streaming showed text that is not a prefix of the reply");
+    }
+    check(fixture.row(fixture.header() + 2) == " " + reply, "The streamed reply is incomplete");
+    check(fixture.screen.history.empty(), "Streaming frames reached scrollback");
+    check(occurrences(fixture.finish(), reply) == 1, "The streamed reply was not printed once");
+}
+
+void viewport_pinned_scrolling() {
+    ViewportFixture fixture;
+    for (int line = 0; line < 60; ++line) fixture.ui->add(Tone::normal, "line-" + std::to_string(line) + "!");
+    fixture.paint();
+    const auto newest = fixture.transcript();
+    check(newest.back() == " line-59!", "The view does not follow the newest output");
+
+    fixture.ui->scroll(8); // PgUp
+    fixture.paint();
+    const auto pinned = fixture.transcript();
+    check(pinned != newest && pinned.back() == " line-51!", "PgUp did not move eight rows up");
+    check(fixture.hint().starts_with("Scrolled up"), "The hint does not say the view is scrolled");
+
+    // A reply streams, tools report and a result arrives: the view stays.
+    fixture.ui->add(Tone::normal, {});
+    for (int chunk = 0; chunk < 40; ++chunk) fixture.ui->append("more-" + std::to_string(chunk) + "\n");
+    fixture.ui->add(Tone::muted, "• read_file");
+    fixture.ui->add(Tone::warning, "Request cancelled.");
+    fixture.paint();
+    check(fixture.transcript() == pinned, "New output moved the rows being read");
+
+    // PgUp past the start stops at the first row; PgDn returns and follows.
+    for (int page = 0; page < 50; ++page) fixture.ui->scroll(8);
+    fixture.paint();
+    check(fixture.transcript().front() == " line-0!", "Scrolling up should stop at the first row");
+    for (int page = 0; page < 50; ++page) fixture.ui->scroll(-8);
+    fixture.paint();
+    check(fixture.transcript().back() == " Request cancelled.", "PgDn did not return to the newest rows");
+    check(!fixture.hint().starts_with("Scrolled up"), "Returning to the bottom kept the scrolled hint");
+
+    // End, and a message the user sends, return to the newest output.
+    fixture.ui->scroll(3);
+    fixture.ui->scroll_to_bottom();
+    fixture.paint();
+    check(fixture.transcript().back() == " Request cancelled.", "End did not return to the newest rows");
+    fixture.ui->scroll(16);
+    fixture.ui->add(Tone::user, "arn › next question");
+    fixture.paint();
+    check(fixture.transcript().back() == " arn › next question", "Sending a message did not follow the newest output");
+}
+
+void viewport_resize_keeps_layout() {
+    ViewportFixture fixture;
+    for (int line = 0; line < 120; ++line) fixture.ui->add(Tone::normal, "row-" + std::to_string(line) + "!");
+    fixture.ui->input("draft 你好");
+    fixture.paint();
+    // Far enough up that the largest size below still shows the same top.
+    fixture.ui->scroll(40);
+    fixture.paint();
+    const auto top = fixture.transcript().front();
+    for (const auto& [width, height] : {std::pair{70, 24}, std::pair{120, 40}, std::pair{50, 20},
+                                        std::pair{38, 13}, std::pair{100, 30}}) {
+        fixture.resize(width, height);
+        fixture.paint();
+        const auto label = std::to_string(width) + "x" + std::to_string(height);
+        check(occurrences(fixture.screen.all(), "ARN AGENT CODE") == 1, ("Header not shown once at " + label).c_str());
+        check(occurrences(fixture.screen.all(), "arn › ") == 1, ("Prompt not shown once at " + label).c_str());
+        check(fixture.prompt() == "arn › draft 你好", ("Prompt row moved or lost the draft at " + label).c_str());
+        check(fixture.row(height - 4).starts_with("─"), ("Rule row moved at " + label).c_str());
+        check(fixture.hint().starts_with("Scrolled up"), ("Hint row moved at " + label).c_str());
+        check(fixture.row(height - 1).empty(), ("The bottom row is no longer empty at " + label).c_str());
+        check(fixture.transcript().front() == top, ("Resize lost the reading position at " + label).c_str());
+        check(fixture.screen.history.empty(), ("A resize frame reached scrollback at " + label).c_str());
+    }
+    fixture.resize(30, 10);
+    const auto tiny = fixture.paint();
+    check(tiny.find("enlarge terminal") != std::string::npos, "A tiny terminal must ask to be enlarged");
+    fixture.ui->scroll(8); // Ignored while nothing can be shown.
+    fixture.resize(100, 30);
+    fixture.paint();
+    check(fixture.transcript().front() == top, "A tiny terminal changed the reading position");
+}
+
+void viewport_confirmation_rows() {
+    ViewportFixture fixture;
+    fixture.ui->add(Tone::normal, "before the question");
+    fixture.ui->status("ACP tool: delete important file [y/N]");
+    fixture.ui->show_confirmation({});
+    fixture.screen.feed(fixture.capture.take());
+    check(fixture.hint() == "ACP tool: delete important file [y/N]", "The question is not in the status row");
+    check(fixture.prompt() == "arn ›", "An empty choice must leave the prompt empty");
+    fixture.ui->show_confirmation("y");
+    fixture.screen.feed(fixture.capture.take());
+    check(fixture.prompt() == "arn › y", "The choice is not in the prompt row");
+    fixture.ui->finish_confirmation('y');
+    // The agent's reply continues after the answer, on its own row.
+    fixture.ui->append("reply after the answer");
+    fixture.ui->add(Tone::muted, "• read_file");
+    fixture.ui->append("text after the tool");
+    fixture.ui->status(fixture.ui->ready_status());
+    fixture.paint();
+    const auto rows = fixture.transcript();
+    check(rows[1] == " ACP tool: delete important file [y/N] y", "The answer was not recorded");
+    check(rows[2] == " reply after the answer" && rows[3] == " • read_file" && rows[4] == " text after the tool",
+          "Streamed text ran on into a recorded answer or a tool notice");
+    check(fixture.prompt() == "arn ›" && fixture.hint() == fixture.ui->ready_status(), "Footer not restored");
+    const auto printed = fixture.finish();
+    check(printed.find("[y/N] y" + std::string(arn::terminal_ui::reset) + "\n") != std::string::npos &&
+              printed.find("• read_file" + std::string(arn::terminal_ui::reset) + "\n") != std::string::npos,
+          "The transcript joined streamed text to an answer or a notice");
+}
+
+void viewport_cap_keeps_view_and_transcript() {
+    ViewportFixture fixture;
+    for (int entry = 0; entry < 170; ++entry) fixture.ui->add(Tone::normal, "e-" + std::to_string(entry) + "!");
+    fixture.paint();
+    // Pin to e-50, then let the cap drop the 20 oldest entries.
+    fixture.ui->scroll(1000);
+    fixture.ui->scroll(-50);
+    fixture.paint();
+    check(fixture.transcript().front() == " e-50!", "Fixture did not pin to e-50");
+    for (int entry = 170; entry < 185; ++entry) fixture.ui->add(Tone::normal, "e-" + std::to_string(entry) + "!");
+    fixture.paint();
+    check(fixture.transcript().front() == " e-50!", "Dropping old entries moved the rows being read");
+    // A view pinned to dropped text moves to the oldest remaining row.
+    fixture.ui->scroll(1000);
+    fixture.paint();
+    check(fixture.transcript().front() == " e-20!", "The oldest retained entry is not e-20");
+    for (int entry = 185; entry < 400; ++entry) fixture.ui->add(Tone::muted, "e-" + std::to_string(entry) + "!");
+    fixture.paint();
+    check(fixture.transcript().front().starts_with(" e-") && fixture.hint().starts_with("Scrolled up"),
+          "A dropped pinned position did not fall back to the oldest row");
+    const auto oldest = fixture.transcript().front();
+    const auto printed = fixture.finish();
+    check(occurrences(printed, "e-399!") == 1 && printed.find("e-0!") == std::string::npos &&
+              occurrences(printed, oldest.substr(1)) == 1,
+          "The transcript must hold the retained entries, once each");
+    std::size_t lines = 0;
+    for (const char value : printed) lines += value == '\n';
+    check(lines > 160 && lines <= 180, "The 180-entry cap no longer bounds the transcript");
+}
+
+void viewport_strips_controls() {
+    ViewportFixture fixture;
+    fixture.ui->add(Tone::normal, {});
+    fixture.ui->append("safe\x1b[2Jtext\xC2\x9B" "more\x07" "end\r!");
+    const auto frame = fixture.paint();
+    check(frame.find("\x1b[2J") == std::string::npos && frame.find("\xC2\x9B") == std::string::npos &&
+              frame.find('\x07') == std::string::npos,
+          "A frame passed control characters from the conversation to the terminal");
+    check(fixture.row(fixture.header() + 1) == " safe[2Jtextmoreend!", "Visible text around controls changed");
+    const auto printed = fixture.finish();
+    check(printed.find("safe[2Jtextmoreend!") != std::string::npos && printed.find("\x1b[2J") == std::string::npos &&
+              printed.find("\xC2\x9B") == std::string::npos && printed.find('\x07') == std::string::npos,
+          "The transcript passed control characters to the terminal");
 }
 
 int main() {
     const std::pair<const char*, void(*)()> cases[] = {
+        {"viewport_lifecycle_prints_once", viewport_lifecycle_prints_once},
+        {"viewport_exception_unwinds_once", viewport_exception_unwinds_once},
+        {"viewport_keeps_six_tones", viewport_keeps_six_tones},
+        {"viewport_streaming_holds_split_utf8", viewport_streaming_holds_split_utf8},
+        {"viewport_pinned_scrolling", viewport_pinned_scrolling},
+        {"viewport_resize_keeps_layout", viewport_resize_keeps_layout},
+        {"viewport_confirmation_rows", viewport_confirmation_rows},
+        {"viewport_cap_keeps_view_and_transcript", viewport_cap_keeps_view_and_transcript},
+        {"viewport_strips_controls", viewport_strips_controls},
         {"header_matches_existing_layout", header_matches_existing_layout},
         {"startup_is_not_a_redraw_frame", startup_is_not_a_redraw_frame},
-        {"streaming_input_and_history", streaming_input_and_history},
-        {"model_reflow_preserves_ownership", model_reflow_preserves_ownership},
-        {"geometry_redraw_preserves_transcript", geometry_redraw_preserves_transcript},
-        {"input_survives_width_and_height_resize", input_survives_width_and_height_resize},
-        {"streaming_resize_keeps_committed_prefix", streaming_resize_keeps_committed_prefix},
-        {"stale_footer_transcript", +[] { stale_footer_after_host_relocation(Redraw::transcript); }},
-        {"stale_footer_input", +[] { stale_footer_after_host_relocation(Redraw::input); }},
-        {"stale_footer_confirmation", +[] { stale_footer_after_host_relocation(Redraw::confirmation); }},
-        {"stale_footer_finish_confirmation", +[] { stale_footer_after_host_relocation(Redraw::finish_confirmation); }},
-        {"anchor_evidence_is_not_just_geometry", anchor_evidence_is_not_just_geometry},
-        {"new_live_frame_follows_geometry", new_live_frame_follows_geometry},
-        {"unavailable_anchor_retries_without_mutation", unavailable_anchor_retries_without_mutation},
-        {"same_geometry_transcript", +[] { same_geometry_host_relocation(Redraw::transcript); }},
-        {"same_geometry_input", +[] { same_geometry_host_relocation(Redraw::input); }},
-        {"same_geometry_confirmation", +[] { same_geometry_host_relocation(Redraw::confirmation); }},
-        {"same_geometry_finish_confirmation", +[] { same_geometry_host_relocation(Redraw::finish_confirmation); }},
-        {"inline_probe_reflow_blocks_edit", +[] { inline_probe_requires_current_ownership(false); }},
-        {"inline_confirmation_probe_reflow_blocks_edit", +[] { inline_probe_requires_current_ownership(true); }},
         {"redirected_output_is_plain_and_bounded", redirected_output_is_plain_and_bounded},
-        {"capture_failure_falls_back_once", capture_failure_falls_back_once},
-        {"confirmation_retries_preview_after_failed_setup", confirmation_retries_preview_after_failed_setup},
-        {"frames_read_region_twice", frames_read_region_twice},
-        {"same_geometry_resize_render_keeps_one_footer", same_geometry_resize_render_keeps_one_footer},
+        {"plain_output_never_moves_cursor", plain_output_never_moves_cursor},
     };
     int failures = 0;
     for (const auto& [name, test] : cases) {
         test_native = true;
-        anchor_available = true;
-        capture_fails = false;
         test_size = {100, 30};
         try {
             test();

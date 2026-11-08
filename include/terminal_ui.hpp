@@ -1,9 +1,13 @@
 #pragma once
 
 #include "terminal.hpp"
+#include "tui/frame.hpp"
+#include "tui/model.hpp"
+#include "tui/text.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -30,31 +34,6 @@ inline std::size_t char_bytes(unsigned char byte) {
     return 1;
 }
 
-inline std::size_t display_columns(std::string_view text) {
-    std::size_t columns = 0;
-    for (std::size_t index = 0; index < text.size();) {
-        index += std::min(char_bytes(static_cast<unsigned char>(text[index])), text.size() - index);
-        ++columns;
-    }
-    return columns;
-}
-
-inline std::vector<std::string> wrap(std::string_view text, std::size_t width) {
-    std::vector<std::string> output;
-    std::string line;
-    std::size_t columns = 0;
-    for (std::size_t index = 0; index < text.size();) {
-        if (text[index] == '\n') { output.push_back(std::move(line)); line.clear(); columns = 0; ++index; continue; }
-        const auto count = std::min(char_bytes(static_cast<unsigned char>(text[index])), text.size() - index);
-        if (columns == width) { output.push_back(std::move(line)); line.clear(); columns = 0; }
-        line.append(text.substr(index, count));
-        index += count;
-        ++columns;
-    }
-    if (!line.empty() || output.empty()) output.push_back(std::move(line));
-    return output;
-}
-
 inline std::string horizontal_rule(std::size_t cells) {
     std::string result;
     result.reserve(cells * 3);
@@ -65,34 +44,69 @@ inline std::string horizontal_rule(std::size_t cells) {
 enum class Tone { normal, user, muted, good, warning, error };
 struct Entry { Tone tone; std::string text; };
 
+// Two presentations share this facade, chosen by the terminal session's
+// native_scrollback():
+//  - The viewport (an interactive terminal: POSIX, and Windows when input and
+//    output are a console) owns an alternate screen. Every frame is composed
+//    from the arn::tui model, and finish() leaves it and prints the
+//    conversation once.
+//  - Plain output (Windows with redirected input or output) only appends:
+//    the startup banner once, new transcript text once, and the prompt line
+//    when it changes. It never moves the cursor or edits earlier output.
 class Ui {
 public:
-    explicit Ui(const arn::TerminalSession& terminal) : terminal_(terminal) {}
+    explicit Ui(const arn::TerminalSession& terminal) : terminal_(terminal) {
+        if (terminal_.native_scrollback()) return;
+        viewport_ = true;
+        std::cout << "\x1b[?1049h\x1b[2J\x1b[H" << std::flush;
+    }
+    // Runs on every exit path that unwinds: /exit, end of input, a handled
+    // signal, an exception.
+    ~Ui() {
+        try { finish(); } catch (...) {}
+    }
+    Ui(const Ui&) = delete;
+    Ui& operator=(const Ui&) = delete;
 
     void add(Tone tone, std::string text) {
         log_.push_back({tone, std::move(text)});
+        if (viewport_) {
+            // Every entry is an open "reply" in the model, so append() can
+            // continue it and a split UTF-8 character waits for its tail.
+            transcript_.begin_reply();
+            transcript_.stream(log_.back().text);
+            // A message the user sends returns the view to the newest output;
+            // tool notices and results never move what is being read.
+            if (tone == Tone::user) view_ = {};
+        }
         if (log_.size() > 180) {
             log_.erase(log_.begin(), log_.begin() + 20);
             if (printed_entries_ >= 20) printed_entries_ -= 20;
             else printed_entries_ = printed_bytes_ = 0;
+            if (viewport_) rebuild_transcript(20);
         }
-        scroll_offset_ = 0;
     }
-    void append(std::string_view text) { if (log_.empty()) add(Tone::normal, {}); log_.back().text.append(text); scroll_offset_ = 0; }
+    void append(std::string_view text) {
+        // Streamed text continues a reply. In the viewport, text arriving
+        // after a tool notice, a recorded answer or a result starts a new
+        // reply entry instead of running on in that entry.
+        if (log_.empty() || (viewport_ && log_.back().tone != Tone::normal)) add(Tone::normal, {});
+        log_.back().text.append(text);
+        if (viewport_) transcript_.stream(text);
+    }
     void clear() {
-        log_.clear(); scroll_offset_ = 0;
+        log_.clear();
         printed_entries_ = printed_bytes_ = 0;
+        if (viewport_) {
+            transcript_ = tui::Conversation(tui::Decoration::none);
+            view_ = {};
+        }
         if (terminal_.native_scrollback()) {
-            // /clear explicitly clears the viewport, never native scrollback.
-            std::cout << "\x1b[2J\x1b[H";
+            // Plain output cannot erase what it printed: later entries are
+            // appended below, and the startup banner is never repeated.
+            if (stream_line_open_) std::cout << "\r\n" << std::flush;
             stream_line_open_ = false;
-            live_ = {};
-            native_anchor_lost_ = false;
-            // Clearing the viewport is not a new session. The startup block
-            // has already become terminal history and must never be replayed.
-            native_header_anchored_ = false;
             native_line_columns_ = 0;
-            native_body_rows_ = terminal_.size().height;
             native_plain_prompt_.clear();
         }
     }
@@ -104,183 +118,170 @@ public:
         provider_ = provider; model_ = model; context_ = context;
     }
 
+    // Positive amounts show older rows. The view stays pinned to the text at
+    // its top while output arrives; reaching the newest rows follows again.
     void scroll(int amount) {
         if (terminal_.native_scrollback()) return;
         const auto [width, height] = dimensions();
         if (width < 38 || height < 13) return;
-        const int inner = width - 4;
-        const int header = inner < 58 ? 5 : inner < 76 ? 7 : 9;
-        const int visible_rows = std::max(0, height - 3 - (header + 2));
-        std::size_t total_rows = 0;
-        for (const auto& entry : log_) total_rows += wrap(entry.text, static_cast<std::size_t>(inner - 2)).size();
-        const auto maximum = total_rows > static_cast<std::size_t>(visible_rows)
-            ? total_rows - static_cast<std::size_t>(visible_rows) : 0;
-        if (amount > 0) scroll_offset_ = std::min(maximum, scroll_offset_ + static_cast<std::size_t>(amount));
-        else scroll_offset_ = static_cast<std::size_t>(std::max<std::ptrdiff_t>(0, static_cast<std::ptrdiff_t>(scroll_offset_) + amount));
+        view_ = tui::scrolled(transcript_, viewport_input(width, height), -static_cast<long long>(amount));
     }
 
-    void scroll_to_bottom() { scroll_offset_ = 0; }
+    void scroll_to_bottom() { view_ = {}; }
 
     void render() const {
         if (terminal_.native_scrollback()) { render_transcript(); return; }
+        if (finished_) return;
         const auto [width, height] = dimensions();
-        std::cout << "\x1b[?2026h\x1b[?25l\x1b[2J\x1b[H";
         if (width < 38 || height < 13) {
-            std::cout << cyan << "ARN" << reset << " — enlarge terminal\x1b[?25h\x1b[?2026l" << std::flush;
+            std::cout << "\x1b[?2026h\x1b[?25l\x1b[2J\x1b[H" << cyan << "ARN" << reset
+                      << " — enlarge terminal\x1b[?25h\x1b[?2026l" << std::flush;
             return;
         }
+        // The whole frame is composed first and written at once, so a host
+        // without synchronized output (classic conhost) never shows it half
+        // drawn. Each row is erased right before it is redrawn in place:
+        // nothing scrolls, so no frame can reach scrollback, and no earlier
+        // frame can remain.
+        BufferedFrame frame;
+        std::cout << "\x1b[?2026h\x1b[?25l\x1b[?7l";
         const int left = 2, inner = width - 4, header = inner < 58 ? 5 : inner < 76 ? 7 : 9;
+        for (int row = 1; row <= header + 1; ++row) clear_line(row);
         header_box(left, inner, header);
-        const int content_top = header + 2, footer = height - 3, rows = std::max(0, footer - content_top);
-        std::vector<Entry> lines;
-        for (const auto& entry : log_) for (auto line : wrap(entry.text, static_cast<std::size_t>(inner - 2))) lines.push_back({entry.tone, std::move(line)});
-        const std::size_t bottom = lines.size() > static_cast<std::size_t>(rows) ? lines.size() - static_cast<std::size_t>(rows) : 0;
-        const std::size_t start = bottom > scroll_offset_ ? bottom - scroll_offset_ : 0;
-        for (int row = 0; row < rows; ++row) if (start + row < lines.size()) at(content_top + row, left, color(lines[start + row].tone) + lines[start + row].text + std::string(reset));
-        at(footer, 1, std::string(dim) + horizontal_rule(static_cast<std::size_t>(width - 2)) + std::string(reset));
-        at(footer + 1, 1, std::string(cyan) + "arn" + std::string(amber) + " › " + std::string(reset) + input_);
-        const auto footer_hint = current_hint();
-        at(footer + 2, 1, std::string(dim) + footer_hint + std::string(reset));
-        place_cursor(footer, width);
-        std::cout << "\x1b[?25h\x1b[?2026l" << std::flush;
+        const auto layout = tui::locate(transcript_, viewport_input(width, height));
+        // Rows start below the header, as before; only a full view scrolls.
+        const auto shown = std::min(layout.body, layout.rows.size() - layout.top);
+        for (std::size_t index = 0; index < layout.body; ++index) {
+            const int row_number = header + 2 + static_cast<int>(index);
+            clear_line(row_number);
+            if (index >= shown) continue;
+            const auto& row = layout.rows[layout.top + index];
+            const auto tone = row.start.entry < log_.size() ? log_[row.start.entry].tone : Tone::normal;
+            at(row_number, left, color(tone) + row.text + std::string(reset));
+        }
+        draw_viewport_footer(width, height, true);
+        clear_line(height); // The bottom row stays empty.
+        std::cout << "\x1b[?7h\x1b[?25h\x1b[?2026l";
+        frame.write();
     }
 
     void render_input() const {
-        if (terminal_.native_scrollback()) {
-            // Plain output cannot edit a line in place; it prints prompts on
-            // full renders only, so keystrokes never append output.
-            if (!native_plain_) render_native_footer();
-            return;
-        }
+        // Plain output cannot edit a line in place; it prints prompts on full
+        // renders only, so keystrokes never append output.
+        if (terminal_.native_scrollback()) return;
+        if (finished_) return;
         const auto [width, height] = dimensions();
         if (width < 38 || height < 13) { render(); return; }
-        const int footer = height - 3;
-        const auto footer_hint = current_hint();
-        std::cout << "\x1b[?2026h\x1b[?25l";
-        clear_line(footer + 1);
-        std::cout << cyan << "arn" << amber << " › " << reset << input_;
-        clear_line(footer + 2);
-        std::cout << dim << footer_hint << reset;
-        place_cursor(footer, width);
-        std::cout << "\x1b[?25h\x1b[?2026l" << std::flush;
+        BufferedFrame frame;
+        std::cout << "\x1b[?2026h\x1b[?25l\x1b[?7l";
+        draw_viewport_footer(width, height, false);
+        std::cout << "\x1b[?7h\x1b[?25h\x1b[?2026l";
+        frame.write();
+    }
+
+    // Leaves the POSIX viewport and prints the conversation into normal
+    // scrollback, once. Later calls, and Windows, do nothing.
+    void finish() {
+        if (!viewport_ || finished_) return;
+        finished_ = true;
+        std::cout << reset << "\x1b[?2026l\x1b[?7h\x1b[?25h\x1b[?1049l" << transcript_text() << std::flush;
     }
 
     void show_confirmation(std::string_view choice) {
-        if (terminal_.native_scrollback()) {
-            input(std::string(choice));
-            if (!confirmation_visible_) {
-                // Retry on every display until the change preview is flushed:
-                // never show the y/N prompt without the transcript above it.
-                if (!render_transcript(false)) return;
-                confirmation_visible_ = true;
-            }
-            render_native_footer();
-        } else {
-            input(std::string(choice));
+        input(std::string(choice));
+        if (!terminal_.native_scrollback()) {
             render();
+            return;
         }
+        if (!confirmation_visible_) {
+            // Print the transcript (the change preview) before the question:
+            // the y/N prompt never appears without what it asks about.
+            render_transcript(false);
+            confirmation_visible_ = true;
+        }
+        print_plain_prompt();
     }
 
     void finish_confirmation(int answer) {
-        if (terminal_.native_scrollback() && !native_plain_) {
-            const bool had_footer = live_.footer;
-            if (erase_native_footer() && had_footer) remember_native_region(false);
-        } else {
-            add(Tone::muted, status_ + (answer == 'y' ? " y" : answer == 'n' ? " n" : ""));
-        }
+        add(Tone::muted, status_ + (answer == 'y' ? " y" : answer == 'n' ? " n" : ""));
         confirmation_visible_ = false;
         input({});
     }
 
     [[nodiscard]] std::string ready_status() const {
+#ifdef _WIN32
+        // Windows selects text natively (no mouse capture): no F2 copy mode.
+        return "Type /help for commands";
+#else
         return terminal_.native_scrollback() ? "Type /help for commands"
             : "Type /help for commands · F2 copy mode";
+#endif
     }
 
 private:
-    // Windows uses the original layout on the main buffer. Only the live
-    // three-row footer is replaced; the startup header and conversation become
-    // native terminal history rather than being repainted from log_.
-    static std::string clipped(std::string_view text, std::size_t width) {
-        std::string result;
-        std::size_t columns = 0;
-        for (std::size_t index = 0; index < text.size();) {
-            if (text[index] == '\x1b' && index + 1 < text.size() && text[index + 1] == '[') {
-                const auto begin = index;
-                index += 2;
-                while (index < text.size()) {
-                    const auto value = static_cast<unsigned char>(text[index++]);
-                    if (value >= 0x40 && value <= 0x7e) break;
+    // --- Plain output (redirected input or output) -------------------------
+
+    std::string session_text() const {
+        return std::string(dim) + "Provider: " + provider_ + " · Model: " +
+            (model_.empty() ? "not selected" : model_) + " · Context: " +
+            (context_ ? "active" : "empty") + std::string(reset);
+    }
+
+    // The startup banner as text lines: draw_header() paints into cells
+    // instead of positioning the cursor, so plain output stays append-only.
+    // Each cell keeps the colour codes that precede its glyph.
+    std::vector<std::string> header_lines(int left, int inner, int height) const {
+        std::vector<std::vector<std::string>> cells(
+            static_cast<std::size_t>(height), std::vector<std::string>(static_cast<std::size_t>(left - 1 + inner), " "));
+        const auto paint = [&](int row, int column, const std::string& text) {
+            auto& line = cells[static_cast<std::size_t>(row - 1)];
+            std::string pending; // Escape sequences waiting for the next glyph.
+            auto cell = static_cast<std::size_t>(column - 1);
+            std::size_t last = line.size();
+            for (std::size_t index = 0; index < text.size();) {
+                if (text[index] == '\x1b' && index + 1 < text.size() && text[index + 1] == '[') {
+                    const auto begin = index;
+                    index += 2;
+                    while (index < text.size() && !(text[index] >= '@' && text[index] <= '~')) ++index;
+                    index = std::min(index + 1, text.size());
+                    pending.append(text, begin, index - begin);
+                    continue;
                 }
-                result.append(text.substr(begin, index - begin));
-                continue;
+                const auto count = std::min(char_bytes(static_cast<unsigned char>(text[index])), text.size() - index);
+                if (cell < line.size()) {
+                    line[cell] = pending + text.substr(index, count);
+                    pending.clear();
+                    last = cell++;
+                }
+                index += count;
             }
-            if (columns == width || text[index] == '\r' || text[index] == '\n') break;
-            const auto count = std::min(char_bytes(static_cast<unsigned char>(text[index])),
-                                        text.size() - index);
-            result.append(text.substr(index, count));
-            index += count;
-            ++columns;
+            if (!pending.empty() && last < line.size()) line[last] += pending;
+        };
+        draw_header(left, inner, height, paint);
+        std::vector<std::string> lines;
+        for (auto& row : cells) {
+            while (!row.empty() && row.back() == " ") row.pop_back();
+            std::string line;
+            for (const auto& cell : row) line += cell;
+            lines.push_back(std::move(line));
         }
-        return result;
+        return lines;
     }
 
-    struct LiveRegionState {
-        bool exists{}, footer{};
-        std::uint64_t generation{};
-        arn::TerminalLiveAnchor anchor;
-    };
-
-    void observe_native_geometry() const {
+    void emit_plain_startup() const {
+        if (native_startup_emitted_) return;
+        native_startup_emitted_ = true;
         const auto [width, height] = dimensions();
-        if (width == geometry_.width && height == geometry_.height) return;
-        geometry_ = {width, height};
-        ++geometry_generation_;
-    }
-
-    void remember_native_region(bool footer) const {
-        if (native_plain_) return;
-        const auto creation_generation = geometry_generation_;
-        observe_native_geometry();
-        live_.exists = true;
-        live_.footer = footer;
-        live_.generation = creation_generation;
-        if (creation_generation != geometry_generation_) {
-            // Geometry changed during output: do not certify the torn frame
-            // as belonging to the newly observed generation.
-            live_.anchor = {};
+        if (width < 38 || height < 13) {
+            std::cout << cyan << "ARN AGENT CODE" << reset << " — enlarge terminal\r\n";
             return;
         }
-        // Certify the gap and stream append position cleanup may navigate to.
-        // While header metadata is live, certify its viewport rows as well.
-        const int before = native_header_anchored_ ? geometry_.height
-            : footer ? 1 + native_footer_gap_ + (stream_line_open_ ? 1 : 0) : 0;
-        live_.anchor = terminal_.capture_live_anchor(before, footer ? 1 : 0);
-        if (live_.anchor.state) return;
-        // Output we just wrote cannot be read back (redirected stdout or an
-        // unreadable console). Re-anchoring would only stack another footer.
-        observe_native_geometry();
-        if (creation_generation == geometry_generation_) enter_plain_output(footer);
+        const int inner = width - 4, header = inner < 58 ? 5 : inner < 76 ? 7 : 9;
+        for (const auto& line : header_lines(2, inner, header)) std::cout << line << "\r\n";
+        std::cout << "\r\n"; // The gap below the banner, as on the alternate screen.
     }
 
-    // Plain output is append-only and permanent for this Ui: no live footer,
-    // no cursor movement, prompts printed once per change. It is never left,
-    // because a backend that failed to certify one region may fail again.
-    void enter_plain_output(bool below_footer) const {
-        // The footer just drawn stays as history; continue below its hint row.
-        if (below_footer) {
-            std::cout << "\x1b[1B\r\n";
-            stream_line_open_ = false;
-            native_line_columns_ = 0;
-        }
-        native_plain_ = true;
-        live_ = {};
-        native_anchor_lost_ = false;
-        native_header_anchored_ = false;
-        native_footer_gap_ = 0;
-        std::cout << std::flush;
-    }
-
+    // The prompt line, printed only when its text changes.
     void print_plain_prompt() const {
         const auto text = current_hint();
         if (text == native_plain_prompt_) return;
@@ -291,102 +292,8 @@ private:
         native_line_columns_ = 0;
     }
 
-    bool verify_native_region() const {
-        if (native_plain_) return true;
-        observe_native_geometry();
-        if (!live_.exists && !native_anchor_lost_) return true;
-        if (live_.exists && live_.generation == geometry_generation_ &&
-            terminal_.live_anchor_valid(live_.anchor)) return true;
-        // The old presentation belongs to host reflow/history now. Never
-        // navigate back to it; preserve logical input/confirmation/log offsets.
-        live_ = {};
-        native_anchor_lost_ = true;
-        native_header_anchored_ = false;
-        native_footer_gap_ = 0;
-        native_body_rows_ = geometry_.height;
-        stream_line_open_ = false;
-        native_line_columns_ = 0;
-        if (!terminal_.begin_output_region()) return false;
-        native_anchor_lost_ = false;
-        remember_native_region(false);
-        return true;
-    }
-
-    bool erase_native_footer() const {
-        if (!verify_native_region()) return false;
-        if (!live_.footer) return true;
-        // Contents, cursor and geometry still match our flushed snapshot.
-        std::cout << "\x1b[1A\r\x1b[2K\x1b[1B\r\x1b[2K\x1b[1B\r\x1b[2K\x1b[2A\r";
-        live_.footer = false;
-        if (native_footer_gap_ > 0)
-            std::cout << "\x1b[" << native_footer_gap_ << "A\r";
-        if (stream_line_open_)
-            std::cout << "\x1b[1A\r\x1b[" << native_line_columns_ + 2 << 'G';
-        // The caller certifies the region after its remaining output.
-        return true;
-    }
-
-    void emit_native_startup() const {
-        if (native_startup_emitted_) return;
-        const auto [width, height] = dimensions();
-        const int inner = std::max(1, width - 4);
-        const int header = inner < 58 ? 5 : inner < 76 ? 7 : 9;
-        if (width < 38 || height < 13) {
-            std::cout << cyan << "ARN AGENT CODE" << reset << " — enlarge terminal\r\n";
-        } else {
-            // Reserve the initial layout once, using normal scrollback.
-            std::cout << "\r";
-            for (int row = 1; row < height; ++row) std::cout << "\n";
-            std::cout << "\x1b[" << height - 1 << "A\r";
-            std::cout << "\x1b[s\x1b[?7l";
-            const auto paint = [&](int row, int column, const std::string& text) {
-                std::cout << "\x1b[" << row << ';' << column << 'H';
-                const auto right = 2 + inner - 1;
-                const auto available = column == 2 ? inner
-                    : column == right ? 1 : std::max(0, right - column);
-                std::cout << clipped(text, static_cast<std::size_t>(available)) << reset;
-            };
-            for (int row = 2; row < header; ++row)
-                paint(row, 3, std::string(static_cast<std::size_t>(inner - 2), ' '));
-            draw_header(2, inner, header, paint);
-            std::cout << "\x1b[" << header + 2 << ";1H";
-            std::cout << "\x1b[?7h";
-            native_header_anchored_ = true;
-        }
-        native_startup_emitted_ = true;
-        native_header_state_ = session_state();
-        native_header_width_ = width;
-        native_header_height_ = header;
-        native_screen_height_ = height;
-    }
-
-    std::string session_state() const {
-        return provider_ + '\n' + model_ + (context_ ? "\nactive" : "\nempty");
-    }
-
-    std::string session_text() const {
-        return std::string(dim) + "Provider: " + provider_ + " · Model: " +
-            (model_.empty() ? "not selected" : model_) + " · Context: " +
-            (context_ ? "active" : "empty") + std::string(reset);
-    }
-
-    void repaint_native_session() const {
-        const auto [width, height] = dimensions();
-        if (width != native_header_width_ || height != native_screen_height_ ||
-            native_body_rows_ + (stream_line_open_ ? 1 : 0) > height - native_header_height_ - 5)
-            native_header_anchored_ = false;
-        // Only repaint the status row while its original location is known.
-        // Once scrolled/reflowed, the host owns the startup block as history.
-        // Repainting must never recreate a welcome frame or transcript entry.
-        const auto state = session_state();
-        if (!native_header_anchored_ || native_header_height_ <= 5 || state == native_header_state_) return;
-        const auto available = static_cast<std::size_t>(std::max(0, width - 7));
-        std::cout << "\x1b[s\x1b[?7l\x1b[" << native_header_height_ - 1 << ";4H"
-                  << std::string(available, ' ') << "\x1b[" << native_header_height_ - 1 << ";4H"
-                  << clipped(session_text(), available) << reset << "\x1b[u\x1b[?7h";
-        native_header_state_ = state;
-    }
-
+    // Known limitation: wrapping counts one cell per character, so wide (CJK,
+    // emoji) text can wrap later than the terminal would wrap it.
     void append_native_text(std::string_view text, Tone tone) const {
         const auto width = static_cast<std::size_t>(std::max(1, terminal_.size().width - 6));
         std::cout << color(tone);
@@ -395,7 +302,6 @@ private:
                 std::cout << "\r\n";
                 native_line_columns_ = 0;
                 stream_line_open_ = false;
-                ++native_body_rows_;
                 ++index;
                 continue;
             }
@@ -403,7 +309,6 @@ private:
                 std::cout << "\r\n";
                 native_line_columns_ = 0;
                 stream_line_open_ = false;
-                ++native_body_rows_;
             }
             if (!stream_line_open_) std::cout << ' '; // Same conversation margin.
             const auto count = std::min(char_bytes(static_cast<unsigned char>(text[index])),
@@ -416,46 +321,10 @@ private:
         std::cout << reset;
     }
 
-    void render_native_footer() const {
-        if (!verify_native_region()) return;
-        draw_native_footer();
-    }
-
-    // Callers must have verified the region in this frame.
-    void draw_native_footer() const {
-        if (native_plain_) {
-            print_plain_prompt();
-            return;
-        }
-        const auto [columns, height] = dimensions();
-        const auto width = std::max(9, columns);
-        const auto lines = wrap(input_, static_cast<std::size_t>(width - 8));
-        const auto& tail = lines.back();
-        std::cout << "\x1b[?2026h\x1b[?25l\x1b[?7l";
-        if (!live_.footer) {
-            if (stream_line_open_) std::cout << "\r\n";
-            native_footer_gap_ = std::max(0, height - native_header_height_ - 5 -
-                native_body_rows_ - (stream_line_open_ ? 1 : 0));
-            for (int row = 0; row < native_footer_gap_; ++row) std::cout << "\r\n";
-            std::cout << dim << horizontal_rule(static_cast<std::size_t>(width - 2))
-                      << reset << "\r\n";
-        } else {
-            std::cout << "\r\x1b[2K";
-        }
-        std::cout << cyan << "arn" << amber << " › " << reset << tail;
-        if (live_.footer) std::cout << "\x1b[1B\r\x1b[2K";
-        else std::cout << "\r\n";
-        std::cout << dim << clipped(current_hint(), static_cast<std::size_t>(width - 2))
-                  << reset << "\x1b[1A\r\x1b[" << 7 + display_columns(tail)
-                  << "G\x1b[?7h\x1b[?25h\x1b[?2026l" << std::flush;
-        remember_native_region(true);
-    }
-
-    // Returns false when no output region could be established.
-    bool render_transcript(bool show_footer = true) const {
-        if (!erase_native_footer()) return false;
-        emit_native_startup();
-        repaint_native_session();
+    // Appends what the conversation gained since the last call, then the
+    // prompt line when `show_prompt` is set and its text changed.
+    void render_transcript(bool show_prompt = true) const {
+        emit_plain_startup();
         for (std::size_t index = printed_entries_; index < log_.size(); ++index) {
             const auto& entry = log_[index];
             const auto offset = index == printed_entries_ ? printed_bytes_ : 0;
@@ -463,7 +332,6 @@ private:
                 std::cout << "\r\n";
                 native_line_columns_ = 0;
                 stream_line_open_ = false;
-                ++native_body_rows_;
             }
             if (entry.text.size() > offset)
                 append_native_text(std::string_view(entry.text).substr(offset), entry.tone);
@@ -473,20 +341,12 @@ private:
                 printed_bytes_ = entry.text.size();
             }
         }
-        // A region certified earlier was verified when this frame began and
-        // has received only our output since. Unless geometry changed, draw
-        // the footer directly: re-reading here would only repeat that check.
-        // The first frame has no certified region and is checked first.
-        const auto [width, height] = dimensions();
-        if (show_footer && live_.exists && width == geometry_.width && height == geometry_.height) {
-            draw_native_footer();
-        } else {
-            remember_native_region(false);
-            if (show_footer) render_native_footer();
-        }
+        if (show_prompt) print_plain_prompt();
         std::cout << std::flush;
-        return true;
     }
+
+    // --- Shared ------------------------------------------------------------
+
     [[nodiscard]] std::pair<int, int> dimensions() const {
         const auto dimensions = terminal_.size();
         return {dimensions.width, dimensions.height};
@@ -497,20 +357,107 @@ private:
     static void clear_line(int row) { std::cout << "\x1b[" << row << ";1H\x1b[2K"; }
     std::string current_hint() const {
         if (copy_mode_) return "COPY MODE · Drag to select, then " + std::string(copy_shortcut) + " · F2 returns to scrolling";
-        if (scroll_offset_ != 0) return "Scrolled up · Wheel down or End returns to the latest message · Shift+drag selects text";
+#ifdef _WIN32
+        // The Windows alternate screen does not read the mouse wheel.
+        if (!view_.follow) return "Scrolled up · PgDn or End returns to the latest message";
+#else
+        if (!view_.follow) return "Scrolled up · Wheel down or End returns to the latest message · Shift+drag selects text";
+#endif
         auto text = confirmation_visible_ || hint_.empty() ? status_ : hint_;
         if (terminal_.native_scrollback()) {
+            // Plain output has a single prompt line: status and hint share it.
             if (!confirmation_visible_ && !hint_.empty() && status_ != ready_status())
                 text = status_ + " · " + hint_;
             if (const auto copy = text.find(" · F2 copy mode"); copy != std::string::npos)
                 text.erase(copy);
         }
+#ifdef _WIN32
+        else if (const auto copy = text.find(" · F2 copy mode"); copy != std::string::npos) {
+            text.erase(copy);
+        }
+#endif
         return text;
     }
-    void place_cursor(int footer, int width) const {
-        std::cout << "\x1b[" << footer + 1 << ';'
-                  << std::min(width - 1, 7 + static_cast<int>(display_columns(input_))) << 'H';
+    // Collects what is written to std::cout while a frame is composed, then
+    // writes it in one piece. Destroyed without write() (an exception while
+    // composing), the partial frame is dropped.
+    struct BufferedFrame {
+        std::ostringstream text;
+        std::streambuf* previous{std::cout.rdbuf(text.rdbuf())};
+        BufferedFrame() = default;
+        BufferedFrame(const BufferedFrame&) = delete;
+        BufferedFrame& operator=(const BufferedFrame&) = delete;
+        ~BufferedFrame() { std::cout.rdbuf(previous); }
+        void write() {
+            std::cout.rdbuf(previous);
+            const auto bytes = text.str();
+            std::cout.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            std::cout.flush();
+        }
+    };
+
+    // The transcript area of the POSIX viewport, for the tui core: rows
+    // header+2 .. height-4 at the old wrap width (inner - 2 cells), followed
+    // by the three footer rows. The bottom row stays empty, as before.
+    tui::FrameInput viewport_input(int width, int height) const {
+        const int inner = width - 4, header = inner < 58 ? 5 : inner < 76 ? 7 : 9;
+        tui::FrameInput input;
+        input.width = inner - 1;            // Layout width inner - 2.
+        input.height = height - header - 2; // Transcript rows plus three.
+        input.view = view_;
+        return input;
     }
+
+    // Rule, hint and prompt rows. The prompt row is written last, so the
+    // cursor rests right after the draft whatever the width of its glyphs.
+    void draw_viewport_footer(int width, int height, bool rule) const {
+        const int footer = height - 3;
+        if (rule) {
+            clear_line(footer);
+            std::cout << dim << horizontal_rule(static_cast<std::size_t>(width - 2)) << reset;
+        }
+        clear_line(footer + 2);
+        std::cout << dim << tui::fit_cells(current_hint(), width - 2) << reset;
+        clear_line(footer + 1);
+        std::cout << cyan << "arn" << amber << " › " << reset << tui::tail_cells(input_, width - 8);
+    }
+
+    // The model mirrors log_ entry for entry. After the cap drops the oldest
+    // entries it is rebuilt from what remains, and a pinned view moves with
+    // its text (or to the oldest row, if its text was dropped).
+    void rebuild_transcript(std::size_t dropped) {
+        transcript_ = tui::Conversation(tui::Decoration::none);
+        for (const auto& entry : log_) {
+            transcript_.begin_reply();
+            transcript_.stream(entry.text);
+        }
+        if (view_.follow) return;
+        if (view_.top.entry >= dropped) view_.top.entry -= dropped;
+        else view_.top = {};
+    }
+
+    // The conversation for normal scrollback: one line per logical line,
+    // left to the terminal to wrap. Control characters are dropped and
+    // invalid UTF-8 becomes U+FFFD, so stored text cannot drive the terminal.
+    std::string transcript_text() const {
+        std::string out;
+        for (const auto& entry : log_) {
+            out += color(entry.tone);
+            out += ' ';
+            const std::string_view text = entry.text;
+            for (std::size_t index = 0; index < text.size();) {
+                const auto scalar = tui::decode(text, index);
+                if (scalar.code == '\n') out += std::string(reset) + "\n" + color(entry.tone) + ' ';
+                else if (scalar.code == '\t') out += '\t';
+                else if (scalar.code == 0xFFFD) out += "\xEF\xBF\xBD";
+                else if (!tui::is_control(scalar.code)) out.append(text.substr(index, scalar.size));
+                index += scalar.size;
+            }
+            out += std::string(reset) + "\n";
+        }
+        return out;
+    }
+
     static std::string color(Tone tone) {
         switch (tone) {
         case Tone::user: return std::string(cyan);
@@ -555,20 +502,20 @@ private:
     std::vector<Entry> log_;
     const arn::TerminalSession& terminal_;
     std::string input_, hint_, status_{"Type /help for commands · F2 copy mode"}, provider_{"none"}, model_;
-    std::size_t scroll_offset_{};
+    // Viewport: the model mirrors log_; view_ is what the transcript area
+    // shows. With plain output view_ always follows.
+    bool viewport_{}, finished_{};
+    tui::Conversation transcript_{tui::Decoration::none};
+    tui::View view_{};
     bool copy_mode_{};
     bool context_{};
+    // Plain output: how much of log_ has been printed, whether the startup
+    // banner was printed, whether the last printed line is still open, and
+    // the last prompt line printed.
     mutable std::size_t printed_entries_{}, printed_bytes_{};
-    mutable bool native_startup_emitted_{}, native_header_anchored_{}, stream_line_open_{};
+    mutable bool native_startup_emitted_{}, stream_line_open_{};
     bool confirmation_visible_{};
-    mutable std::string native_header_state_;
-    mutable int native_header_width_{}, native_header_height_{}, native_screen_height_{};
-    mutable int native_body_rows_{}, native_footer_gap_{};
-    mutable LiveRegionState live_;
-    mutable bool native_anchor_lost_{}, native_plain_{};
     mutable std::string native_plain_prompt_;
-    mutable arn::TerminalSize geometry_{};
-    mutable std::uint64_t geometry_generation_{1};
     mutable std::size_t native_line_columns_{};
 };
 

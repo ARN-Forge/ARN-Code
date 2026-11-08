@@ -35,6 +35,7 @@ find_package(Threads REQUIRED)
 
 include(CTest)
 option(ARN_ENABLE_KIRO_INTEGRATION_TESTS "Run tests using an installed/authenticated Kiro CLI" OFF)
+option(ARN_ENABLE_PTY_TESTS "Run the POSIX terminal tests on a real pseudo-terminal (needs bash, tmux and node)" OFF)
 
 # ARN Core dependency
 # Supports:
@@ -226,6 +227,15 @@ if (BUILD_TESTING)
     add_executable(terminal_ui_test tests/terminal_ui_test.cpp)
     target_include_directories(terminal_ui_test PRIVATE include)
     add_test(NAME terminal_ui COMMAND terminal_ui_test)
+    # Header-only renderer core (include/tui). Not used by the arn target yet.
+    add_executable(tui_renderer_test tests/tui_renderer_test.cpp)
+    target_include_directories(tui_renderer_test PRIVATE include)
+    if (MSVC)
+        target_compile_options(tui_renderer_test PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(tui_renderer_test PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME tui_renderer COMMAND tui_renderer_test)
     if (WIN32)
         add_executable(terminal_windows_test tests/terminal_windows_test.cpp
             src/terminal_windows.cpp src/cli_support.cpp)
@@ -233,6 +243,30 @@ if (BUILD_TESTING)
         target_link_libraries(terminal_windows_test PRIVATE Threads::Threads)
         add_test(NAME terminal_windows_input COMMAND terminal_windows_test $<TARGET_FILE:arn>)
         set_tests_properties(terminal_windows_input PROPERTIES TIMEOUT 30)
+        # Renderer choice (default alternate screen, native opt-out, redirected
+        # I/O) on a real console. Needs a console that can be resized; under a
+        # pseudoconsole it reports "not exercised".
+        add_executable(fake_kiro_cli tests/fake_kiro_cli.cpp)
+        add_executable(terminal_windows_alt_test tests/terminal_windows_alt_test.cpp src/terminal_windows.cpp)
+        target_include_directories(terminal_windows_alt_test PRIVATE include)
+        target_link_libraries(terminal_windows_alt_test PRIVATE Threads::Threads)
+        add_test(NAME terminal_windows_alternate
+                 COMMAND terminal_windows_alt_test $<TARGET_FILE:arn> $<TARGET_FILE:fake_kiro_cli>
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/acp_fake_server.mjs)
+        set_tests_properties(terminal_windows_alternate PROPERTIES TIMEOUT 240)
+    else()
+        add_executable(terminal_posix_test tests/terminal_posix_test.cpp src/terminal_posix.cpp)
+        target_include_directories(terminal_posix_test PRIVATE include)
+        target_link_libraries(terminal_posix_test PRIVATE Threads::Threads)
+        add_test(NAME terminal_posix COMMAND terminal_posix_test)
+        set_tests_properties(terminal_posix PROPERTIES TIMEOUT 60)
+        if (ARN_ENABLE_PTY_TESTS)
+            add_test(NAME terminal_posix_pty
+                     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_pty_test.sh
+                             $<TARGET_FILE:arn> $<TARGET_FILE:terminal_posix_test>
+                             ${CMAKE_CURRENT_SOURCE_DIR}/tests/acp_fake_server.mjs)
+            set_tests_properties(terminal_posix_pty PROPERTIES TIMEOUT 600)
+        endif()
     endif()
     add_executable(normal_chat_test tests/normal_chat_test.cpp src/normal_chat.cpp)
     target_include_directories(normal_chat_test PRIVATE include)

@@ -159,6 +159,26 @@ disabled, so enter keys only through the masked prompt. Never put keys in commit
 issue reports, or screenshots. Provider usage may
 incur charges and is subject to the provider's quota and availability.
 
+## Terminal display
+
+ARN Code draws its interface on the terminal's alternate screen, so the shell
+history above stays untouched while it runs. PgUp, PgDn and End scroll the
+conversation, also while a reply is streaming (on Linux the mouse wheel
+scrolls too, and F2 toggles copy mode). When ARN Code exits, the
+conversation is printed once into normal scrollback.
+
+On Windows this is the only interactive display: ARN Code uses the alternate
+screen whenever standard input and standard output are a console. If either is
+redirected (a pipe or a file), it prints plain append-only output instead: the
+banner, the conversation and prompt lines, in colour but without moving the
+cursor or switching screens. ARN Code reads keys only from a console, so with
+redirected standard input it reads no commands and exits.
+
+`ARN_TERMINAL_RENDERER` no longer selects anything. The previous Windows
+renderer (`native`) has been removed; `native`, and any value other than
+`alternate`, makes ARN Code show a warning and is otherwise ignored.
+Redirected input or output always gets plain output.
+
 ## Safe local tools
 
 In native provider mode, ARN Code treats its launch directory as the project
