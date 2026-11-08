@@ -6,9 +6,11 @@
 //
 //   terminal_windows_alt_test [arn.exe fake_kiro_cli.exe acp_fake_server.mjs]
 //
-// Run it in a visible or minimized console. Under a pseudoconsole (for
-// example CTest in some environments) the window cannot be resized or read
-// as a classic console; the test then reports "not exercised".
+// Run it in a visible or minimized console. When the allocated console has no
+// window that can be resized and read back (a pseudoconsole, a session
+// without a desktop, or CTest's way of starting tests), or the ARN paths are
+// missing, it checks nothing more, says so and exits with 77, which CTest
+// reports as skipped (SKIP_RETURN_CODE), never as passed.
 
 #include "terminal.hpp"
 #include "terminal_posix_view.hpp"
@@ -992,10 +994,16 @@ int main(int argc, char** argv) {
     GetConsoleMode(console.output, &mode);
     SetConsoleMode(console.output, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT);
     set_renderer(nullptr);
+    constexpr int skipped = 77; // CTest's SKIP_RETURN_CODE for this test.
     int result = 0;
     try {
         if (!window || !reset_normal_screen(console.output)) {
-            std::puts("console: the host is a pseudoconsole without a resizable classic console; not exercised");
+            std::printf("terminal_windows_alt_test: SKIPPED: %s, so nothing was tested. Run it directly in "
+                        "a visible or minimized console window.\n",
+                        !window ? "the allocated console has no window (a pseudoconsole or a session "
+                                  "without a desktop)"
+                                : "the console window could not be resized and read back");
+            result = skipped;
         } else {
             mode_selection(console);
             lifecycle(console, false);
@@ -1019,10 +1027,12 @@ int main(int argc, char** argv) {
                 arn_redirected_output(console, arn, L"x\x1b]0;ARN_TITLE\x07y\x1b[2Jz\r\x9b!",
                                       "ARN_TERMINAL_RENDERER=\"x]0;ARN_TITLEy[2Jz!\" is not supported");
                 arn_redirected_input(console, arn);
+                std::printf("terminal_windows_alt_test: %d checks passed\n", checks);
             } else {
-                std::puts("console: no ARN path given; ARN process tests not exercised");
+                std::printf("terminal_windows_alt_test: SKIPPED: %d console checks passed, but the ARN "
+                            "process tests need arn.exe, fake_kiro_cli.exe and acp_fake_server.mjs.\n", checks);
+                result = skipped;
             }
-            std::printf("terminal_windows_alt_test: %d checks passed\n", checks);
         }
     } catch (const std::exception& error) {
         std::fprintf(stderr, "terminal_windows_alt_test FAILED after %d checks: %s\n", checks, error.what());

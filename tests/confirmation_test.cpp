@@ -72,14 +72,8 @@ int main() {
                         })
                .ok);
     check(tools.execute("read_file", {{"path", "x.txt"}}, no).result["content"] == "external edit");
-    std::ofstream(root / "outside") << "outside";
-    std::error_code ec;
-    std::filesystem::create_symlink(root / "outside", root / "project/link", ec);
-    if (!ec) {
-        check(!tools.execute("write_file", {{"path", "link"}, {"content", "bad"}}, yes).ok);
-        check(!tools.execute("read_file", {{"path", "link"}}, yes).ok);
-    } else
-        std::cout << "SKIP symlink creation: " << ec.message() << '\n';
+    // Links that point outside the project: tests/sandbox_symlink_test.cpp,
+    // which reports itself skipped where links cannot be created.
     check(!tools.execute("delete_file", {{"path", "x.txt"}}, no).ok);
     check(tools.execute("delete_file", {{"path", "x.txt"}}, yes).ok);
     std::filesystem::remove_all(root); // Unique test-owned temporary tree only.

@@ -64,3 +64,31 @@ jobs:
       - name: Smoke test Unix executable
         if: runner.os != 'Windows'
         run: ./build/arn --version
+
+  # One Debug build with AddressSanitizer and UndefinedBehaviorSanitizer runs
+  # every test, including the POSIX terminal UI on a real pseudo-terminal
+  # (tests/posix_pty_test.sh, through tmux). Any sanitizer report stops the
+  # test that triggered it, so it fails.
+  linux-sanitizers:
+    name: Linux x64 Debug ASan/UBSan + PTY
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev ninja-build tmux
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DARN_ENABLE_PTY_TESTS=ON
+          "-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Tests, including the PTY suite
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build --output-on-failure

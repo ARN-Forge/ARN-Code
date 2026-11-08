@@ -176,6 +176,17 @@ if (BUILD_TESTING)
     file(MAKE_DIRECTORY "${_arn_code_test_temp}")
     set_tests_properties(confirmations_and_tools PROPERTIES
         ENVIRONMENT "TEMP=${_arn_code_test_temp};TMP=${_arn_code_test_temp}")
+    # Links out of the project. Creating a link needs a privilege some systems
+    # do not grant; the test then exits with 77 and CTest reports it skipped.
+    add_executable(sandbox_symlink_test tests/sandbox_symlink_test.cpp
+                                        src/tools/workspace_sandbox.cpp
+                                        src/tools/coding_tools.cpp)
+    target_include_directories(sandbox_symlink_test PRIVATE include)
+    target_link_libraries(sandbox_symlink_test PRIVATE arn::core nlohmann_json::nlohmann_json Threads::Threads)
+    add_test(NAME sandbox_symlinks COMMAND sandbox_symlink_test)
+    set_tests_properties(sandbox_symlinks PROPERTIES
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "TEMP=${_arn_code_test_temp};TMP=${_arn_code_test_temp}")
     add_executable(arn_server_fixture tests/server_fixture.cpp
                                       src/server.cpp
                                       src/tools/workspace_sandbox.cpp
@@ -188,6 +199,8 @@ if (BUILD_TESTING)
         set_tests_properties(server_protocol PROPERTIES
             TIMEOUT 30
             ENVIRONMENT "TEMP=${_arn_code_test_temp};TMP=${_arn_code_test_temp}")
+    else()
+        message(STATUS "Python 3 not found: the server_protocol test is not registered")
     endif()
     if (WIN32)
         find_program(ARN_POWERSHELL_EXECUTABLE NAMES pwsh powershell REQUIRED)
@@ -243,9 +256,10 @@ if (BUILD_TESTING)
         target_link_libraries(terminal_windows_test PRIVATE Threads::Threads)
         add_test(NAME terminal_windows_input COMMAND terminal_windows_test $<TARGET_FILE:arn>)
         set_tests_properties(terminal_windows_input PROPERTIES TIMEOUT 30)
-        # Renderer choice (default alternate screen, native opt-out, redirected
-        # I/O) on a real console. Needs a console that can be resized; under a
-        # pseudoconsole it reports "not exercised".
+        # Renderer choice (default alternate screen, unsupported values,
+        # redirected I/O) on a real console. Needs a console window that can be
+        # resized and read back; without one it exits with 77 and CTest reports
+        # it skipped. Run it directly in a console window to exercise it.
         add_executable(fake_kiro_cli tests/fake_kiro_cli.cpp)
         add_executable(terminal_windows_alt_test tests/terminal_windows_alt_test.cpp src/terminal_windows.cpp)
         target_include_directories(terminal_windows_alt_test PRIVATE include)
@@ -253,7 +267,7 @@ if (BUILD_TESTING)
         add_test(NAME terminal_windows_alternate
                  COMMAND terminal_windows_alt_test $<TARGET_FILE:arn> $<TARGET_FILE:fake_kiro_cli>
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/acp_fake_server.mjs)
-        set_tests_properties(terminal_windows_alternate PROPERTIES TIMEOUT 240)
+        set_tests_properties(terminal_windows_alternate PROPERTIES TIMEOUT 240 SKIP_RETURN_CODE 77)
     else()
         add_executable(terminal_posix_test tests/terminal_posix_test.cpp src/terminal_posix.cpp)
         target_include_directories(terminal_posix_test PRIVATE include)
@@ -273,6 +287,32 @@ if (BUILD_TESTING)
     target_link_libraries(normal_chat_test PRIVATE arn::core)
     add_test(NAME normal_chat COMMAND normal_chat_test)
 
+    # Labels select groups (ctest -L unit). Every test has a timeout, so a hang
+    # fails within minutes instead of CTest's default 1500 seconds.
+    #   unit         runs in-process; starts no other program
+    #   integration  starts other programs (ARN, Node, Python, PowerShell, itself)
+    #   console      needs a Windows console
+    #   pty          needs a pseudo-terminal (tmux)
+    set(_arn_unit_tests model_list model_provider confirmations_and_tools sandbox_symlinks
+        architecture_boundary agent_workflow cli_support confirmation_input terminal_ui
+        tui_renderer normal_chat)
+    set_tests_properties(${_arn_unit_tests} PROPERTIES LABELS unit TIMEOUT 60)
+    set(_arn_integration_tests acp_client acp_session acp_subprocess)
+    if (Python3_FOUND)
+        list(APPEND _arn_integration_tests server_protocol)
+    endif()
+    if (WIN32)
+        list(APPEND _arn_integration_tests windows_install)
+        set_tests_properties(terminal_windows_input terminal_windows_alternate PROPERTIES
+            LABELS "console;integration")
+    else()
+        set_tests_properties(terminal_posix PROPERTIES LABELS unit)
+        if (ARN_ENABLE_PTY_TESTS)
+            set_tests_properties(terminal_posix_pty PROPERTIES LABELS "pty;integration")
+        endif()
+    endif()
+    set_tests_properties(${_arn_integration_tests} PROPERTIES LABELS integration)
+
     if (MSVC)
         target_compile_options(confirmation_test PRIVATE /utf-8)
         target_compile_options(arn_server_fixture PRIVATE /utf-8)
@@ -287,7 +327,7 @@ if (WIN32)
     set(_arn_code_runtime_targets arn)
     if (BUILD_TESTING)
         list(APPEND _arn_code_runtime_targets
-            model_list_test model_provider_test confirmation_test
+            model_list_test model_provider_test confirmation_test sandbox_symlink_test
             arn_server_fixture architecture_test agent_workflow_test)
         list(APPEND _arn_code_runtime_targets cli_support_test normal_chat_test)
         list(APPEND _arn_code_runtime_targets acp_client_test acp_session_test acp_smoke_test)
