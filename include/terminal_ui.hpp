@@ -34,6 +34,36 @@ inline std::size_t char_bytes(unsigned char byte) {
     return 1;
 }
 
+// Plain output writes text ARN does not control (model replies, tool
+// summaries, provider and model names) to a pipe, a file or the console, so
+// it checks every scalar before writing it. UTF-8 is strict here: overlong
+// forms, surrogates and values above U+10FFFF are malformed, like invalid or
+// truncated bytes, and each malformed byte decodes as U+FFFD. tui::decode,
+// which the viewport uses, stays lenient.
+inline tui::Scalar plain_scalar(std::string_view text, std::size_t index) {
+    const auto scalar = tui::decode(text, index);
+    const char32_t shortest = scalar.size == 2 ? 0x80 : scalar.size == 3 ? 0x800 : 0x10000;
+    if (scalar.size > 1 && (scalar.code < shortest || scalar.code > 0x10FFFF ||
+                            (scalar.code >= 0xD800 && scalar.code <= 0xDFFF)))
+        return {0xFFFD, 1};
+    return scalar;
+}
+
+// One line of plain text (the prompt line, a provider or model name): valid
+// UTF-8 byte for byte, U+FFFD for malformed bytes, and no control characters
+// at all (C0 including CR, LF and tab, DEL, C1), so no escape sequence or
+// line break survives.
+inline std::string plain_line(std::string_view text) {
+    std::string out;
+    for (std::size_t index = 0; index < text.size();) {
+        const auto scalar = plain_scalar(text, index);
+        if (scalar.code == 0xFFFD) out += "\xEF\xBF\xBD";
+        else if (!tui::is_control(scalar.code)) out.append(text.substr(index, scalar.size));
+        index += scalar.size;
+    }
+    return out;
+}
+
 inline std::string horizontal_rule(std::size_t cells) {
     std::string result;
     result.reserve(cells * 3);
@@ -52,7 +82,9 @@ struct Entry { Tone tone; std::string text; };
 //    conversation once.
 //  - Plain output (Windows with redirected input or output) only appends:
 //    the startup banner once, new transcript text once, and the prompt line
-//    when it changes. It never moves the cursor or edits earlier output.
+//    when it changes. It never moves the cursor or edits earlier output, and
+//    text it does not control passes plain_scalar() and drops control
+//    characters first (see append_native_text and plain_line).
 class Ui {
 public:
     explicit Ui(const arn::TerminalSession& terminal) : terminal_(terminal) {
@@ -221,9 +253,12 @@ public:
 private:
     // --- Plain output (redirected input or output) -------------------------
 
-    std::string session_text() const {
-        return std::string(dim) + "Provider: " + provider_ + " · Model: " +
-            (model_.empty() ? "not selected" : model_) + " · Context: " +
+    // `plain`: the names pass plain_line() (the plain banner). The viewport
+    // header keeps them as they are.
+    std::string session_text(bool plain = false) const {
+        const auto name = [&](const std::string& value) { return plain ? plain_line(value) : value; };
+        return std::string(dim) + "Provider: " + name(provider_) + " · Model: " +
+            (model_.empty() ? "not selected" : name(model_)) + " · Context: " +
             (context_ ? "active" : "empty") + std::string(reset);
     }
 
@@ -257,7 +292,7 @@ private:
             }
             if (!pending.empty() && last < line.size()) line[last] += pending;
         };
-        draw_header(left, inner, height, paint);
+        draw_header(left, inner, height, paint, true);
         std::vector<std::string> lines;
         for (auto& row : cells) {
             while (!row.empty() && row.back() == " ") row.pop_back();
@@ -281,42 +316,49 @@ private:
         std::cout << "\r\n"; // The gap below the banner, as on the alternate screen.
     }
 
-    // The prompt line, printed only when its text changes.
+    // The prompt line, printed only when its text changes. A status can quote
+    // a model's request, so the line passes plain_line().
     void print_plain_prompt() const {
         const auto text = current_hint();
         if (text == native_plain_prompt_) return;
         native_plain_prompt_ = text;
         if (stream_line_open_) std::cout << "\r\n";
-        std::cout << dim << text << reset << "\r\n" << std::flush;
+        std::cout << dim << plain_line(text) << reset << "\r\n" << std::flush;
         stream_line_open_ = false;
         native_line_columns_ = 0;
     }
 
+    // Writes conversation text: valid UTF-8 byte for byte, U+FFFD for each
+    // malformed byte (plain_scalar), LF as a new line with the margin, tab
+    // as it is; every other control character (CR, ESC and the rest of C0,
+    // DEL, C1) is dropped, so stored text cannot drive the terminal. The
+    // characters after a dropped ESC stay visible, as in the viewport.
     // Known limitation: wrapping counts one cell per character, so wide (CJK,
     // emoji) text can wrap later than the terminal would wrap it.
     void append_native_text(std::string_view text, Tone tone) const {
         const auto width = static_cast<std::size_t>(std::max(1, terminal_.size().width - 6));
         std::cout << color(tone);
         for (std::size_t index = 0; index < text.size();) {
-            if (text[index] == '\n') {
+            const auto scalar = plain_scalar(text, index);
+            const auto bytes = text.substr(index, scalar.size);
+            index += scalar.size;
+            if (scalar.code == '\n') {
                 std::cout << "\r\n";
                 native_line_columns_ = 0;
                 stream_line_open_ = false;
-                ++index;
                 continue;
             }
+            if (scalar.code != '\t' && tui::is_control(scalar.code)) continue;
             if (native_line_columns_ >= width) {
                 std::cout << "\r\n";
                 native_line_columns_ = 0;
                 stream_line_open_ = false;
             }
             if (!stream_line_open_) std::cout << ' '; // Same conversation margin.
-            const auto count = std::min(char_bytes(static_cast<unsigned char>(text[index])),
-                                        text.size() - index);
-            std::cout << text.substr(index, count);
-            native_line_columns_ += text[index] != '\r';
+            if (scalar.code == 0xFFFD) std::cout << "\xEF\xBF\xBD";
+            else std::cout << bytes;
+            ++native_line_columns_;
             stream_line_open_ = true;
-            index += count;
         }
         std::cout << reset;
     }
@@ -333,12 +375,17 @@ private:
                 native_line_columns_ = 0;
                 stream_line_open_ = false;
             }
-            if (entry.text.size() > offset)
-                append_native_text(std::string_view(entry.text).substr(offset), entry.tone);
-            // Retain the last entry offset because streaming appends to it.
-            if (index + 1 == log_.size()) {
+            // Streaming appends to the last entry, so it can end inside a
+            // UTF-8 character that the next chunk completes: that tail waits.
+            // An earlier entry is complete; an incomplete tail there is
+            // malformed and becomes U+FFFD.
+            const bool open = index + 1 == log_.size();
+            auto rest = std::string_view(entry.text).substr(std::min(offset, entry.text.size()));
+            if (open) rest = rest.substr(0, tui::complete_prefix(rest));
+            if (!rest.empty()) append_native_text(rest, entry.tone);
+            if (open) {
                 printed_entries_ = index;
-                printed_bytes_ = entry.text.size();
+                printed_bytes_ = offset + rest.size();
             }
         }
         if (show_prompt) print_plain_prompt();
@@ -472,8 +519,9 @@ private:
         draw_header(left, width, height, at);
     }
 
+    // `plain`: drawn for the plain banner (see session_text).
     template<class Draw>
-    void draw_header(int left, int width, int height, Draw&& at) const {
+    void draw_header(int left, int width, int height, Draw&& at, bool plain = false) const {
         const std::string rule = horizontal_rule(static_cast<std::size_t>(width - 2));
         at(1, left, std::string(cyan) + "╭" + rule + "╮" + std::string(reset));
         for (int row = 2; row < height; ++row) { at(row, left, std::string(cyan) + "│" + std::string(reset)); at(row, left + width - 1, std::string(cyan) + "│" + std::string(reset)); }
@@ -496,7 +544,7 @@ private:
             at(7, left + 30, std::string(dim) + "Esc cancels · keys and context stay in memory" + std::string(reset));
         }
         if (height > 5) {
-            at(height - 1, left + 2, session_text());
+            at(height - 1, left + 2, session_text(plain));
         }
     }
     std::vector<Entry> log_;

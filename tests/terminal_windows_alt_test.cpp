@@ -126,6 +126,14 @@ std::string narrow(std::wstring_view text) {
     return result;
 }
 
+// For this test's own log lines: control characters shown as '?'.
+std::string printable(std::wstring_view text) {
+    std::wstring copy(text);
+    for (auto& unit : copy)
+        if (unit < 0x20 || (unit >= 0x7F && unit <= 0x9F)) unit = L'?';
+    return narrow(copy);
+}
+
 std::wstring widen(std::string_view text) {
     std::wstring wide(text.size(), L'\0');
     wide.resize(static_cast<std::size_t>(MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
@@ -828,7 +836,9 @@ void arn_redirected_input(const Console& console, const std::wstring& arn) {
     std::puts("console: ARN with redirected input (console output) prints plain output and ends cleanly");
 }
 
-void arn_redirected_output(const Console& console, const std::wstring& arn, const wchar_t* value) {
+// `shown`, when given, is text the output must contain.
+void arn_redirected_output(const Console& console, const std::wstring& arn, const wchar_t* value,
+                           std::string_view shown = {}) {
     HANDLE reader{}, writer{};
     SECURITY_ATTRIBUTES attributes{sizeof attributes, nullptr, TRUE};
     check(CreatePipe(&reader, &writer, &attributes, 0), "CreatePipe failed");
@@ -889,8 +899,10 @@ void arn_redirected_output(const Console& console, const std::wstring& arn, cons
     if (value && std::wstring_view(value) == L"native")
         check(output.find("is no longer supported: the native renderer was removed") != std::string::npos,
               "Plain output did not report the removed renderer");
+    if (!shown.empty())
+        check(output.find(shown) != std::string::npos, "Redirected output did not show: " + std::string(shown));
     std::printf("console: ARN with redirected output prints plain output (ARN_TERMINAL_RENDERER=%s)\n",
-                value ? narrow(value).c_str() : "(unset)");
+                value ? printable(value).c_str() : "(unset)");
 }
 
 } // namespace
@@ -940,6 +952,11 @@ int main(int argc, char** argv) {
                 arn_redirected_output(console, arn, nullptr);
                 arn_redirected_output(console, arn, L"alternate");
                 arn_redirected_output(console, arn, L"native");
+                // Regression: the warning quotes the variable's value, and
+                // plain output wrote it unchanged, so a window-title OSC, a
+                // clear-screen CSI, BEL, CR and a C1 CSI reached the pipe.
+                arn_redirected_output(console, arn, L"x\x1b]0;ARN_TITLE\x07y\x1b[2Jz\r\x9b!",
+                                      "ARN_TERMINAL_RENDERER=\"x]0;ARN_TITLEy[2Jz!\" is not supported");
                 arn_redirected_input(console, arn);
             } else {
                 std::puts("console: no ARN path given; ARN process tests not exercised");

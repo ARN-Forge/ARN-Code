@@ -797,6 +797,245 @@ void viewport_strips_controls() {
           "The transcript passed control characters to the terminal");
 }
 
+// --- Plain output: text ARN does not control -----------------------------
+// Model replies, tool summaries and provider or model names reach plain
+// output, which goes to a pipe, a file or the console. None of it may carry a
+// terminal command, and valid UTF-8 must arrive byte for byte.
+
+// The bytes with ARN's own colour sequences removed: the text as written.
+std::string without_own_colours(std::string text) {
+    using namespace arn::terminal_ui;
+    for (const auto own : {reset, cyan, amber, orange, green, dim, red})
+        for (auto at = text.find(own); at != std::string::npos; at = text.find(own, at)) text.erase(at, own.size());
+    return text;
+}
+
+// Well-formed UTF-8 (RFC 3629): shortest form, no surrogates, at most U+10FFFF.
+bool strict_utf8(std::string_view text) {
+    const auto in = [&](std::size_t at, unsigned low, unsigned high) {
+        return at < text.size() && static_cast<unsigned char>(text[at]) >= low &&
+               static_cast<unsigned char>(text[at]) <= high;
+    };
+    for (std::size_t at = 0; at < text.size();) {
+        const auto lead = static_cast<unsigned char>(text[at]);
+        if (lead <= 0x7F) at += 1;
+        else if (lead >= 0xC2 && lead <= 0xDF && in(at + 1, 0x80, 0xBF)) at += 2;
+        else if (lead == 0xE0 && in(at + 1, 0xA0, 0xBF) && in(at + 2, 0x80, 0xBF)) at += 3;
+        else if (((lead >= 0xE1 && lead <= 0xEC) || lead == 0xEE || lead == 0xEF) &&
+                 in(at + 1, 0x80, 0xBF) && in(at + 2, 0x80, 0xBF)) at += 3;
+        else if (lead == 0xED && in(at + 1, 0x80, 0x9F) && in(at + 2, 0x80, 0xBF)) at += 3;
+        else if (lead == 0xF0 && in(at + 1, 0x90, 0xBF) && in(at + 2, 0x80, 0xBF) && in(at + 3, 0x80, 0xBF)) at += 4;
+        else if (lead >= 0xF1 && lead <= 0xF3 && in(at + 1, 0x80, 0xBF) && in(at + 2, 0x80, 0xBF) &&
+                 in(at + 3, 0x80, 0xBF)) at += 4;
+        else if (lead == 0xF4 && in(at + 1, 0x80, 0x8F) && in(at + 2, 0x80, 0xBF) && in(at + 3, 0x80, 0xBF)) at += 4;
+        else return false;
+    }
+    return true;
+}
+
+// Apart from ARN's own colours, plain output is well-formed UTF-8 text with
+// tabs and CR LF line breaks: no escape sequence, no other C0 control, no DEL,
+// no C1 control. Checking the raw bytes too catches a colour sequence written
+// inside a UTF-8 character.
+bool only_text(std::string_view raw) {
+    if (!strict_utf8(raw)) return false;
+    const auto text = without_own_colours(std::string(raw));
+    for (std::size_t at = 0; at < text.size(); ++at) {
+        const auto byte = static_cast<unsigned char>(text[at]);
+        if (byte == '\r' && at + 1 < text.size() && text[at + 1] == '\n') continue;
+        if (byte == '\n' || byte == '\t') continue;
+        if (byte < 0x20 || byte == 0x7F) return false;
+        if (byte == 0xC2 && at + 1 < text.size() && static_cast<unsigned char>(text[at + 1]) <= 0x9F)
+            return false; // U+0080..U+009F: a C1 control.
+    }
+    return strict_utf8(text);
+}
+
+// What plain output shows: ARN's colours removed, and without the line break
+// that closes the previous line.
+std::string shown(const std::string& raw) {
+    auto text = without_own_colours(raw);
+    if (text.starts_with("\r\n")) text.erase(0, 2);
+    return text;
+}
+
+// A plain-output Ui whose banner and prompt are already written.
+struct PlainFixture {
+    Capture capture;
+    arn::TerminalSession terminal;
+    std::optional<Ui> ui;
+    PlainFixture() {
+        test_native = true;
+        test_size = {100, 30};
+        ui.emplace(terminal);
+        ui->status(ui->ready_status());
+        ui->render();
+        capture.take();
+    }
+    // Renders and returns what was written since the last call.
+    std::string render() {
+        ui->render();
+        return capture.take();
+    }
+};
+
+const std::string replacement = "\xEF\xBF\xBD";
+
+// Regression: plain output wrote stored text unchanged, so escape sequences
+// (clear screen, a window title, a hyperlink), C1 controls, CR, BS, DEL and
+// NUL reached the pipe, the file or the console as terminal commands.
+void plain_output_strips_controls() {
+    PlainFixture plain;
+    const std::pair<std::string, std::string> cases[] = {
+        {"safe\x1b[2Jtext", "safe[2Jtext"},
+        {"a\x1b[31mred\x1b[0m", "a[31mred[0m"},
+        {"title\x1b]0;PWNED\x07" "end", "title]0;PWNEDend"},
+        {"st\x1b]8;;http://x\x1b\x5c" "link", "st]8;;http://x\x5c" "link"},
+        {"c1\xC2\x9B" "2J\xC2\x9D" "0;t\xC2\x9C" "x\xC2\x85" "y", "c12J0;txy"},
+        {"secret\rXXXXXX", "secretXXXXXX"},
+        {std::string("a\x08\x7F") + '\0' + "\x0B\x0C\x1A\x07" "b", "ab"},
+        {"dangling\x1b", "dangling"},
+        {"csi\x1b[", "csi["},
+        {"windows\r\nline", "windows\r\n line"},
+    };
+    for (const auto& [input, expected] : cases) {
+        plain.ui->add(Tone::normal, input);
+        const auto raw = plain.render();
+        check(only_text(raw), "Plain output passed a control character or an escape sequence");
+        check(shown(raw) == " " + expected, "Plain output changed the text around a control character");
+    }
+}
+
+// Valid UTF-8 is written byte for byte, including the continuation bytes
+// 0x80..0x9F that many Cyrillic letters and punctuation marks contain.
+void plain_output_preserves_utf8() {
+    PlainFixture plain;
+    const std::string lines[] = {
+        "Plain ASCII: The quick brown fox, 0123456789 ~!@#$%^&*()[]{}",
+        "Українська: Привіт, ї є ґ і Ї Є Ґ І — «лапки» №5",
+        "Русский: Ёлка, съешь же ещё этих мягких булок",
+        "CJK: 你好世界 日本語のテキスト 한국어 텍스트",
+        "Emoji: 🙂👍🏽 👨‍👩‍👧 🇺🇦 ✅ e\xCC\x81 é € –",
+        "tab\tseparated\tcolumns",
+    };
+    std::string input, expected = " ";
+    for (const auto& line : lines) {
+        if (!input.empty()) { input += '\n'; expected += "\r\n "; }
+        input += line;
+        expected += line;
+    }
+    plain.ui->add(Tone::normal, input);
+    const auto raw = plain.render();
+    check(only_text(raw), "Plain output of valid text was not clean UTF-8");
+    check(shown(raw) == expected, "Plain output changed valid UTF-8 text");
+    const auto c1_range = [](std::string_view text) {
+        return std::count_if(text.begin(), text.end(), [](char byte) {
+            return static_cast<unsigned char>(byte) >= 0x80 && static_cast<unsigned char>(byte) <= 0x9F;
+        });
+    };
+    check(c1_range(input) > 20 && c1_range(shown(raw)) == c1_range(input),
+          "Plain output dropped UTF-8 continuation bytes in 0x80..0x9F");
+}
+
+// A character split across chunks is written once its tail arrives, never in
+// pieces; when its entry ends first, it becomes U+FFFD.
+void plain_output_holds_split_utf8() {
+    {
+        PlainFixture plain;
+        plain.ui->add(Tone::normal, {});
+        const std::string text = "Привіт ї 你好 🙂👍🏽 end";
+        std::string raw;
+        for (const char byte : text) {
+            plain.ui->append(std::string(1, byte));
+            raw += plain.render();
+        }
+        check(only_text(raw), "Plain output wrote a character in pieces");
+        check(shown(raw) == " " + text, "Plain output changed text that arrived byte by byte");
+    }
+    {
+        PlainFixture plain;
+        plain.ui->add(Tone::normal, {});
+        plain.ui->append("x\xF0");
+        auto raw = plain.render();
+        check(shown(raw) == " x", "Plain output wrote the first byte of a character");
+        plain.ui->append("\x9F\x99");
+        raw += plain.render();
+        check(shown(raw) == " x", "Plain output wrote part of a character");
+        plain.ui->append("\x82" "y");
+        raw += plain.render();
+        check(only_text(raw) && shown(raw) == " x🙂y", "A character completed by later chunks was not written whole");
+    }
+    {
+        PlainFixture plain;
+        plain.ui->add(Tone::normal, {});
+        plain.ui->append("a\x1b");
+        auto raw = plain.render();
+        plain.ui->append("[2Jb");
+        raw += plain.render();
+        check(only_text(raw) && shown(raw) == " a[2Jb", "An escape sequence split across chunks reached the output");
+    }
+    for (const auto tone : {Tone::normal, Tone::user, Tone::muted}) {
+        // The entry ends inside a character: a new entry follows.
+        PlainFixture plain;
+        plain.ui->add(Tone::normal, {});
+        plain.ui->append("cut \xF0\x9F");
+        auto raw = plain.render();
+        check(shown(raw) == " cut ", "An incomplete character was written before its entry ended");
+        plain.ui->add(tone, "next entry");
+        raw += plain.render();
+        check(only_text(raw), "An incomplete character at the end of an entry reached the output");
+        check(shown(raw) == " cut " + replacement + replacement + "\r\n next entry",
+              "An incomplete character at the end of an entry did not become U+FFFD");
+    }
+}
+
+// Malformed UTF-8 becomes U+FFFD, one per malformed byte; no raw byte from
+// it reaches the output. Overlong forms, surrogates and values above
+// U+10FFFF are malformed too.
+void plain_output_replaces_invalid_utf8() {
+    PlainFixture plain;
+    const std::pair<std::string, int> cases[] = {
+        {"\x80", 1}, {"\x9B", 1}, {"\x9F\x9F", 2}, {"\xBF", 1},
+        {"\xC0\xAF", 2}, {"\xC1\x9B", 2}, {"\xE0\x80\xAF", 3}, {"\xF0\x80\x80\xAF", 4},
+        {"\xED\xA0\x80", 3}, {"\xED\xBF\xBF", 3}, {"\xF4\x90\x80\x80", 4}, {"\xF5\x80\x80\x80", 4},
+        {"\xF8\x88\x80\x80\x80", 5}, {"\xFE\xFF", 2}, {"\xE2\x82", 2}, {"\xC3", 1},
+    };
+    for (const auto& [bytes, count] : cases) {
+        plain.ui->add(Tone::normal, "a" + bytes + "b");
+        const auto raw = plain.render();
+        std::string expected = " a";
+        for (int index = 0; index < count; ++index) expected += replacement;
+        check(only_text(raw), "Malformed UTF-8 reached plain output");
+        check(shown(raw) == expected + "b", "Malformed UTF-8 did not become one U+FFFD per byte");
+    }
+}
+
+// The banner's provider and model names and the prompt line (a status can
+// quote a model's tool request) get the same treatment.
+void plain_prompt_and_banner_strip_controls() {
+    Capture capture;
+    arn::TerminalSession terminal;
+    test_native = true;
+    test_size = {100, 30};
+    Ui ui(terminal);
+    ui.session("Gem\x1b]0;X\x07" "ini", "model\x1b[2J\xC2\x9B\x9B" "name\r\n", false);
+    ui.status(ui.ready_status());
+    ui.render();
+    auto raw = capture.take();
+    check(only_text(raw), "The plain banner passed a control character from a provider or model name");
+    check(without_own_colours(raw).find("Provider: Gem]0;Xini · Model: model[2J" + replacement + "name · Context: empty") !=
+              std::string::npos,
+          "The plain banner changed the visible provider or model name");
+    ui.status("Allow file change? evil\x1b[2J\r\npath\x1b]0;T\x07 [y/N]");
+    ui.show_confirmation({});
+    raw = capture.take();
+    check(only_text(raw), "The plain prompt line passed a control character");
+    check(without_own_colours(raw).find("Allow file change? evil[2Jpath]0;T [y/N]\r\n") != std::string::npos,
+          "The plain prompt line changed its visible text");
+    ui.show_confirmation("y");
+    check(capture.take().empty(), "An unchanged plain prompt line was printed again");
+}
+
 int main() {
     const std::pair<const char*, void(*)()> cases[] = {
         {"viewport_lifecycle_prints_once", viewport_lifecycle_prints_once},
@@ -812,6 +1051,11 @@ int main() {
         {"startup_is_not_a_redraw_frame", startup_is_not_a_redraw_frame},
         {"redirected_output_is_plain_and_bounded", redirected_output_is_plain_and_bounded},
         {"plain_output_never_moves_cursor", plain_output_never_moves_cursor},
+        {"plain_output_strips_controls", plain_output_strips_controls},
+        {"plain_output_preserves_utf8", plain_output_preserves_utf8},
+        {"plain_output_holds_split_utf8", plain_output_holds_split_utf8},
+        {"plain_output_replaces_invalid_utf8", plain_output_replaces_invalid_utf8},
+        {"plain_prompt_and_banner_strip_controls", plain_prompt_and_banner_strip_controls},
     };
     int failures = 0;
     for (const auto& [name, test] : cases) {
