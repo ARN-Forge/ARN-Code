@@ -45,7 +45,7 @@ constexpr std::array command_hints{"/acp", "/agent", "/key-gemini", "/key-deepse
 
 std::string input_hint(std::string_view input) {
     if (!input.starts_with('/') || input.find_first_of(" \t") != std::string_view::npos) {
-        return "Type /help for commands · Esc cancels a request · F2 copy mode";
+        return "Type /help for commands · Esc/Ctrl+C cancels draft or request · F2 copy mode";
     }
     std::string result;
     for (const auto command : command_hints) {
@@ -90,22 +90,38 @@ std::string read_line(Ui& ui, arn::TerminalSession& terminal) {
             ui.render_input();
             continue;
         }
-        if (event.type == arn::TerminalEventType::page_up) { ui.scroll(8); ui.render(); continue; }
-        if (event.type == arn::TerminalEventType::page_down) { ui.scroll(-8); ui.render(); continue; }
+        if (event.type == arn::TerminalEventType::page_up) { ui.scroll(8 * event.repeat_count); ui.render(); continue; }
+        if (event.type == arn::TerminalEventType::page_down) { ui.scroll(-8 * event.repeat_count); ui.render(); continue; }
         if (event.type == arn::TerminalEventType::end) { ui.scroll_to_bottom(); ui.render(); continue; }
         if (event.type == arn::TerminalEventType::enter) { ui.input({}); ui.hint({}); return buffer; }
         if (event.type == arn::TerminalEventType::end_of_input) return "/exit";
-        if (event.type == arn::TerminalEventType::interrupt || event.type == arn::TerminalEventType::none) continue;
+        if (event.type == arn::TerminalEventType::escape || event.type == arn::TerminalEventType::interrupt) {
+            // Cancel only this draft, with no dispatch/transcript echo and no
+            // new input consumer or outer-loop prompt allocation.
+            std::ranges::fill(buffer, '\0');
+            buffer.clear();
+            ui.input({}); ui.hint({}); ui.render_input();
+            continue;
+        }
+        if (event.type == arn::TerminalEventType::none) continue;
         if (terminal.copy_mode() && event.type == arn::TerminalEventType::character) {
             terminal.set_copy_mode(false);
             ui.copy_mode(false);
         }
-        if (event.type == arn::TerminalEventType::backspace) erase_last_utf8_character(buffer);
-        else if (event.type == arn::TerminalEventType::tab) {
-            for (const auto hint : command_hints) {
-                if (std::string_view(hint).starts_with(buffer)) { buffer = hint; buffer += ' '; break; }
+        if (event.type == arn::TerminalEventType::backspace) {
+            for (std::uint16_t i = 0; i < event.repeat_count && !buffer.empty(); ++i)
+                erase_last_utf8_character(buffer);
+        } else if (event.type == arn::TerminalEventType::tab) {
+            // Leading pasted whitespace must not manufacture a different
+            // command prefix before a credential command can be classified.
+            if (!buffer.empty()) {
+                for (const auto hint : command_hints) {
+                    if (std::string_view(hint).starts_with(buffer)) { buffer = hint; buffer += ' '; break; }
+                }
             }
-        } else if (event.type == arn::TerminalEventType::character) buffer += event.text;
+        } else if (event.type == arn::TerminalEventType::character) {
+            for (std::uint16_t i = 0; i < event.repeat_count; ++i) buffer += event.text;
+        }
         ui.input(arn::safe_command_display(buffer));
         const auto pending_key = arn::parse_api_key_command(buffer);
         ui.hint(pending_key
@@ -122,6 +138,19 @@ int read_confirmation(Ui& ui, arn::TerminalSession& terminal) {
         [&](std::string_view choice) { ui.show_confirmation(choice); });
     ui.finish_confirmation(answer);
     return answer;
+}
+
+bool reset_credential_input(Ui& ui, arn::TerminalSession& terminal) {
+    ui.input({});
+    ui.hint("Input reset required: press Esc or Ctrl+C. Other input is discarded.");
+    // The gate discards pending input before it shows this prompt.
+    // render(), not render_input(): plain output shows prompts on full renders only.
+    const bool resumed = arn::wait_for_credential_input_reset(
+        [&] { return terminal.read_event(); }, [&] { terminal.discard_pending_input(); },
+        [&] { ui.render(); }, [&] { ui.render(); });
+    ui.hint(resumed ? "Input reset complete." : "");
+    ui.render();
+    return resumed;
 }
 
 std::optional<std::string> read_api_key(Ui& ui, arn::TerminalSession& terminal,
@@ -410,6 +439,7 @@ int run() {
                                       " without an argument to enter it securely.");
                 ui.status(ui.ready_status());
                 refresh();
+                if (!reset_credential_input(ui, terminal)) return 0;
                 continue;
             }
             const auto candidate = read_api_key(ui, terminal, arn::provider_name(selected));
@@ -417,6 +447,7 @@ int run() {
                 ui.add(Tone::warning, "API key entry cancelled or empty. Existing configuration is unchanged.");
                 ui.status(ui.ready_status());
                 refresh();
+                if (!reset_credential_input(ui, terminal)) return 0;
                 continue;
             }
             ui.status("Verifying API key…"); refresh();
@@ -493,6 +524,7 @@ int run() {
             }
         } else ui.add(Tone::error, "Unknown command. Type /help for commands.");
         ui.status(ui.ready_status()); refresh();
+        if (key_command && !reset_credential_input(ui, terminal)) return 0;
     }
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -34,6 +35,16 @@ enum class TerminalEventType {
 struct TerminalEvent {
     TerminalEventType type{TerminalEventType::none};
     std::string text;
+    // One decoded scalar/editing key, repeated within one host record. Keeping
+    // the bounded count avoids a pending replay queue crossing input modes.
+    std::uint16_t repeat_count{1};
+};
+
+// Opaque evidence captured by the backend after output has been flushed.
+// A coordinate alone is not an ownership token.
+struct TerminalLiveAnchor {
+    struct State;
+    std::shared_ptr<const State> state;
 };
 
 class TerminalSession {
@@ -53,6 +64,13 @@ public:
         const std::function<void(std::string_view)>& display,
         const std::atomic_bool* cancelled);
     [[nodiscard]] bool native_scrollback() const noexcept;
+    // Drop queued keys and any interrupt received before this call.
+    void discard_pending_input();
+
+    [[nodiscard]] TerminalLiveAnchor capture_live_anchor(int rows_before, int rows_after) const;
+    [[nodiscard]] bool live_anchor_valid(const TerminalLiveAnchor& anchor) const;
+    // Append a blank row below the current viewport; never erase old output.
+    [[nodiscard]] bool begin_output_region() const;
 
     void set_copy_mode(bool enabled);
     [[nodiscard]] bool copy_mode() const noexcept;

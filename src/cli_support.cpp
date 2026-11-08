@@ -41,12 +41,12 @@ void SecretInputBuffer::consume(const TerminalEvent& event) {
     switch (event.type) {
     case TerminalEventType::character:
         if (!event.text.empty()) {
-            secret_ += event.text;
-            ++characters_;
+            for (std::uint16_t i = 0; i < event.repeat_count; ++i) secret_ += event.text;
+            characters_ += event.repeat_count;
         }
         break;
     case TerminalEventType::backspace:
-        if (!secret_.empty()) {
+        for (std::uint16_t i = 0; i < event.repeat_count && !secret_.empty(); ++i) {
             erase_last_utf8_character(secret_);
             --characters_;
         }
@@ -79,7 +79,10 @@ std::optional<std::string> SecretInputBuffer::take_submitted_secret() {
 std::optional<ParsedApiKeyCommand> parse_api_key_command(std::string_view input) {
     input = trim_ascii_whitespace(input);
     const auto separator = input.find_first_of(" \t\r\n");
-    const auto command = lower_ascii(std::string(input.substr(0, separator)));
+    auto command = lower_ascii(std::string(input.substr(0, separator)));
+    // main accepts bare command aliases. Classify them before live display,
+    // not only after dispatch normalization, so inline keys cannot be echoed.
+    if (!command.starts_with('/')) command.insert(command.begin(), '/');
     if (!is_key_command(command)) return std::nullopt;
 
     const auto remainder = separator == std::string_view::npos
@@ -118,6 +121,28 @@ std::string safe_command_display(std::string_view input) {
     return display;
 }
 
+bool wait_for_credential_input_reset(const std::function<TerminalEvent()>& read,
+                                    const std::function<void()>& discard_pending,
+                                    const std::function<void()>& show_prompt,
+                                    const std::function<void()>& resize) {
+    // Discard first, then prompt: discarding after the prompt is visible
+    // could drop a reset key the user sends as soon as it appears.
+    discard_pending();
+    show_prompt();
+    for (;;) {
+        auto event = read();
+        // Discarded characters are never retained as another draft or shown.
+        std::ranges::fill(event.text, '\0');
+        switch (event.type) {
+        case TerminalEventType::escape:
+        case TerminalEventType::interrupt: return true;
+        case TerminalEventType::end_of_input: return false;
+        case TerminalEventType::resize: if (resize) resize(); break;
+        default: break;
+        }
+    }
+}
+
 std::vector<std::string> help_lines() {
     return {
         "Commands:",
@@ -141,6 +166,7 @@ std::vector<std::string> help_lines() {
         "  /key-deepseek              Set DeepSeek API key securely",
         "  /key-openrouter            Set OpenRouter API key securely",
         "  /key-omniroute             Set OmniRoute API key securely",
+        "  After key entry/rejection, press Esc/Ctrl+C to reset input; other input is discarded.",
         "",
         "Session:",
         "  /status                    Show current configuration",

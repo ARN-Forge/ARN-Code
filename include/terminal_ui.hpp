@@ -2,6 +2,7 @@
 
 #include "terminal.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -69,7 +70,6 @@ public:
     explicit Ui(const arn::TerminalSession& terminal) : terminal_(terminal) {}
 
     void add(Tone tone, std::string text) {
-        if (tone == Tone::user) native_new_turn_ = true;
         log_.push_back({tone, std::move(text)});
         if (log_.size() > 180) {
             log_.erase(log_.begin(), log_.begin() + 20);
@@ -86,11 +86,14 @@ public:
             // /clear explicitly clears the viewport, never native scrollback.
             std::cout << "\x1b[2J\x1b[H";
             stream_line_open_ = false;
-            input_visible_ = false;
-            transcript_started_ = false;
-            native_header_state_.clear();
+            live_ = {};
+            native_anchor_lost_ = false;
+            // Clearing the viewport is not a new session. The startup block
+            // has already become terminal history and must never be replayed.
+            native_header_anchored_ = false;
             native_line_columns_ = 0;
-            native_body_rows_ = 0;
+            native_body_rows_ = terminal_.size().height;
+            native_plain_prompt_.clear();
         }
     }
     void input(std::string value) { input_ = std::move(value); }
@@ -144,7 +147,9 @@ public:
 
     void render_input() const {
         if (terminal_.native_scrollback()) {
-            render_native_footer();
+            // Plain output cannot edit a line in place; it prints prompts on
+            // full renders only, so keystrokes never append output.
+            if (!native_plain_) render_native_footer();
             return;
         }
         const auto [width, height] = dimensions();
@@ -162,11 +167,13 @@ public:
 
     void show_confirmation(std::string_view choice) {
         if (terminal_.native_scrollback()) {
+            input(std::string(choice));
             if (!confirmation_visible_) {
-                render_transcript(false);
+                // Retry on every display until the change preview is flushed:
+                // never show the y/N prompt without the transcript above it.
+                if (!render_transcript(false)) return;
                 confirmation_visible_ = true;
             }
-            input(std::string(choice));
             render_native_footer();
         } else {
             input(std::string(choice));
@@ -175,14 +182,14 @@ public:
     }
 
     void finish_confirmation(int answer) {
-        if (terminal_.native_scrollback()) {
-            erase_native_footer();
-            confirmation_visible_ = false;
-            input({});
+        if (terminal_.native_scrollback() && !native_plain_) {
+            const bool had_footer = live_.footer;
+            if (erase_native_footer() && had_footer) remember_native_region(false);
         } else {
             add(Tone::muted, status_ + (answer == 'y' ? " y" : answer == 'n' ? " n" : ""));
-            input({});
         }
+        confirmation_visible_ = false;
+        input({});
     }
 
     [[nodiscard]] std::string ready_status() const {
@@ -192,7 +199,7 @@ public:
 
 private:
     // Windows uses the original layout on the main buffer. Only the live
-    // three-row footer is replaced; header blocks and conversation become
+    // three-row footer is replaced; the startup header and conversation become
     // native terminal history rather than being repainted from log_.
     static std::string clipped(std::string_view text, std::size_t width) {
         std::string result;
@@ -218,48 +225,119 @@ private:
         return result;
     }
 
-    void erase_native_footer() const {
-        if (!input_visible_) return;
-        // The cursor always rests on the middle (input) row. These are live
-        // rows, never previously committed conversation or terminal history.
+    struct LiveRegionState {
+        bool exists{}, footer{};
+        std::uint64_t generation{};
+        arn::TerminalLiveAnchor anchor;
+    };
+
+    void observe_native_geometry() const {
+        const auto [width, height] = dimensions();
+        if (width == geometry_.width && height == geometry_.height) return;
+        geometry_ = {width, height};
+        ++geometry_generation_;
+    }
+
+    void remember_native_region(bool footer) const {
+        if (native_plain_) return;
+        const auto creation_generation = geometry_generation_;
+        observe_native_geometry();
+        live_.exists = true;
+        live_.footer = footer;
+        live_.generation = creation_generation;
+        if (creation_generation != geometry_generation_) {
+            // Geometry changed during output: do not certify the torn frame
+            // as belonging to the newly observed generation.
+            live_.anchor = {};
+            return;
+        }
+        // Certify the gap and stream append position cleanup may navigate to.
+        // While header metadata is live, certify its viewport rows as well.
+        const int before = native_header_anchored_ ? geometry_.height
+            : footer ? 1 + native_footer_gap_ + (stream_line_open_ ? 1 : 0) : 0;
+        live_.anchor = terminal_.capture_live_anchor(before, footer ? 1 : 0);
+        if (live_.anchor.state) return;
+        // Output we just wrote cannot be read back (redirected stdout or an
+        // unreadable console). Re-anchoring would only stack another footer.
+        observe_native_geometry();
+        if (creation_generation == geometry_generation_) enter_plain_output(footer);
+    }
+
+    // Plain output is append-only and permanent for this Ui: no live footer,
+    // no cursor movement, prompts printed once per change. It is never left,
+    // because a backend that failed to certify one region may fail again.
+    void enter_plain_output(bool below_footer) const {
+        // The footer just drawn stays as history; continue below its hint row.
+        if (below_footer) {
+            std::cout << "\x1b[1B\r\n";
+            stream_line_open_ = false;
+            native_line_columns_ = 0;
+        }
+        native_plain_ = true;
+        live_ = {};
+        native_anchor_lost_ = false;
+        native_header_anchored_ = false;
+        native_footer_gap_ = 0;
+        std::cout << std::flush;
+    }
+
+    void print_plain_prompt() const {
+        const auto text = current_hint();
+        if (text == native_plain_prompt_) return;
+        native_plain_prompt_ = text;
+        if (stream_line_open_) std::cout << "\r\n";
+        std::cout << dim << text << reset << "\r\n" << std::flush;
+        stream_line_open_ = false;
+        native_line_columns_ = 0;
+    }
+
+    bool verify_native_region() const {
+        if (native_plain_) return true;
+        observe_native_geometry();
+        if (!live_.exists && !native_anchor_lost_) return true;
+        if (live_.exists && live_.generation == geometry_generation_ &&
+            terminal_.live_anchor_valid(live_.anchor)) return true;
+        // The old presentation belongs to host reflow/history now. Never
+        // navigate back to it; preserve logical input/confirmation/log offsets.
+        live_ = {};
+        native_anchor_lost_ = true;
+        native_header_anchored_ = false;
+        native_footer_gap_ = 0;
+        native_body_rows_ = geometry_.height;
+        stream_line_open_ = false;
+        native_line_columns_ = 0;
+        if (!terminal_.begin_output_region()) return false;
+        native_anchor_lost_ = false;
+        remember_native_region(false);
+        return true;
+    }
+
+    bool erase_native_footer() const {
+        if (!verify_native_region()) return false;
+        if (!live_.footer) return true;
+        // Contents, cursor and geometry still match our flushed snapshot.
         std::cout << "\x1b[1A\r\x1b[2K\x1b[1B\r\x1b[2K\x1b[1B\r\x1b[2K\x1b[2A\r";
-        input_visible_ = false;
+        live_.footer = false;
         if (native_footer_gap_ > 0)
             std::cout << "\x1b[" << native_footer_gap_ << "A\r";
         if (stream_line_open_)
             std::cout << "\x1b[1A\r\x1b[" << native_line_columns_ + 2 << 'G';
+        // The caller certifies the region after its remaining output.
+        return true;
     }
 
-    void render_native_header() const {
+    void emit_native_startup() const {
+        if (native_startup_emitted_) return;
         const auto [width, height] = dimensions();
-        const auto state = provider_ + '\n' + model_ + (context_ ? "\nactive" : "\nempty");
         const int inner = std::max(1, width - 4);
         const int header = inner < 58 ? 5 : inner < 76 ? 7 : 9;
-        const bool same_size = native_header_width_ == width && native_header_height_ == header &&
-            native_screen_height_ == height;
-        const bool header_visible = same_size &&
-            native_body_rows_ + (stream_line_open_ ? 1 : 0) <= height - header - 5;
-        const bool new_frame = !transcript_started_ || !same_size ||
-            (native_new_turn_ && !header_visible);
-        native_new_turn_ = false;
-        if (!new_frame && (native_header_state_ == state || !header_visible)) return;
-        if (new_frame) {
-            if (stream_line_open_) std::cout << "\r\n";
-            stream_line_open_ = false;
-            native_line_columns_ = 0;
-            native_body_rows_ = 0;
-        }
         if (width < 38 || height < 13) {
-            std::cout << cyan << "ARN" << reset << " — enlarge terminal\r\n";
+            std::cout << cyan << "ARN AGENT CODE" << reset << " — enlarge terminal\r\n";
         } else {
-            // Start a frame by scrolling normally, never clearing history.
-            // Within a frame the header can be updated while it is visible;
-            // once it has scrolled away, leave it alone until the next turn.
-            if (new_frame) {
-                std::cout << "\r";
-                for (int row = 1; row < height; ++row) std::cout << "\n";
-                std::cout << "\x1b[" << height - 1 << "A\r";
-            }
+            // Reserve the initial layout once, using normal scrollback.
+            std::cout << "\r";
+            for (int row = 1; row < height; ++row) std::cout << "\n";
+            std::cout << "\x1b[" << height - 1 << "A\r";
             std::cout << "\x1b[s\x1b[?7l";
             const auto paint = [&](int row, int column, const std::string& text) {
                 std::cout << "\x1b[" << row << ';' << column << 'H';
@@ -271,15 +349,42 @@ private:
             for (int row = 2; row < header; ++row)
                 paint(row, 3, std::string(static_cast<std::size_t>(inner - 2), ' '));
             draw_header(2, inner, header, paint);
-            if (new_frame) std::cout << "\x1b[" << header + 2 << ";1H";
-            else std::cout << "\x1b[u";
+            std::cout << "\x1b[" << header + 2 << ";1H";
             std::cout << "\x1b[?7h";
+            native_header_anchored_ = true;
         }
-        transcript_started_ = true;
-        native_header_state_ = state;
+        native_startup_emitted_ = true;
+        native_header_state_ = session_state();
         native_header_width_ = width;
         native_header_height_ = header;
         native_screen_height_ = height;
+    }
+
+    std::string session_state() const {
+        return provider_ + '\n' + model_ + (context_ ? "\nactive" : "\nempty");
+    }
+
+    std::string session_text() const {
+        return std::string(dim) + "Provider: " + provider_ + " · Model: " +
+            (model_.empty() ? "not selected" : model_) + " · Context: " +
+            (context_ ? "active" : "empty") + std::string(reset);
+    }
+
+    void repaint_native_session() const {
+        const auto [width, height] = dimensions();
+        if (width != native_header_width_ || height != native_screen_height_ ||
+            native_body_rows_ + (stream_line_open_ ? 1 : 0) > height - native_header_height_ - 5)
+            native_header_anchored_ = false;
+        // Only repaint the status row while its original location is known.
+        // Once scrolled/reflowed, the host owns the startup block as history.
+        // Repainting must never recreate a welcome frame or transcript entry.
+        const auto state = session_state();
+        if (!native_header_anchored_ || native_header_height_ <= 5 || state == native_header_state_) return;
+        const auto available = static_cast<std::size_t>(std::max(0, width - 7));
+        std::cout << "\x1b[s\x1b[?7l\x1b[" << native_header_height_ - 1 << ";4H"
+                  << std::string(available, ' ') << "\x1b[" << native_header_height_ - 1 << ";4H"
+                  << clipped(session_text(), available) << reset << "\x1b[u\x1b[?7h";
+        native_header_state_ = state;
     }
 
     void append_native_text(std::string_view text, Tone tone) const {
@@ -312,12 +417,22 @@ private:
     }
 
     void render_native_footer() const {
+        if (!verify_native_region()) return;
+        draw_native_footer();
+    }
+
+    // Callers must have verified the region in this frame.
+    void draw_native_footer() const {
+        if (native_plain_) {
+            print_plain_prompt();
+            return;
+        }
         const auto [columns, height] = dimensions();
         const auto width = std::max(9, columns);
         const auto lines = wrap(input_, static_cast<std::size_t>(width - 8));
         const auto& tail = lines.back();
         std::cout << "\x1b[?2026h\x1b[?25l\x1b[?7l";
-        if (!input_visible_) {
+        if (!live_.footer) {
             if (stream_line_open_) std::cout << "\r\n";
             native_footer_gap_ = std::max(0, height - native_header_height_ - 5 -
                 native_body_rows_ - (stream_line_open_ ? 1 : 0));
@@ -328,17 +443,19 @@ private:
             std::cout << "\r\x1b[2K";
         }
         std::cout << cyan << "arn" << amber << " › " << reset << tail;
-        if (input_visible_) std::cout << "\x1b[1B\r\x1b[2K";
+        if (live_.footer) std::cout << "\x1b[1B\r\x1b[2K";
         else std::cout << "\r\n";
         std::cout << dim << clipped(current_hint(), static_cast<std::size_t>(width - 2))
                   << reset << "\x1b[1A\r\x1b[" << 7 + display_columns(tail)
                   << "G\x1b[?7h\x1b[?25h\x1b[?2026l" << std::flush;
-        input_visible_ = true;
+        remember_native_region(true);
     }
 
-    void render_transcript(bool show_footer = true) const {
-        erase_native_footer();
-        render_native_header();
+    // Returns false when no output region could be established.
+    bool render_transcript(bool show_footer = true) const {
+        if (!erase_native_footer()) return false;
+        emit_native_startup();
+        repaint_native_session();
         for (std::size_t index = printed_entries_; index < log_.size(); ++index) {
             const auto& entry = log_[index];
             const auto offset = index == printed_entries_ ? printed_bytes_ : 0;
@@ -356,8 +473,19 @@ private:
                 printed_bytes_ = entry.text.size();
             }
         }
-        if (show_footer) render_native_footer();
+        // A region certified earlier was verified when this frame began and
+        // has received only our output since. Unless geometry changed, draw
+        // the footer directly: re-reading here would only repeat that check.
+        // The first frame has no certified region and is checked first.
+        const auto [width, height] = dimensions();
+        if (show_footer && live_.exists && width == geometry_.width && height == geometry_.height) {
+            draw_native_footer();
+        } else {
+            remember_native_region(false);
+            if (show_footer) render_native_footer();
+        }
         std::cout << std::flush;
+        return true;
     }
     [[nodiscard]] std::pair<int, int> dimensions() const {
         const auto dimensions = terminal_.size();
@@ -421,7 +549,7 @@ private:
             at(7, left + 30, std::string(dim) + "Esc cancels · keys and context stay in memory" + std::string(reset));
         }
         if (height > 5) {
-            at(height - 1, left + 2, std::string(dim) + "Provider: " + provider_ + " · Model: " + (model_.empty() ? "not selected" : model_) + " · Context: " + (context_ ? "active" : "empty") + std::string(reset));
+            at(height - 1, left + 2, session_text());
         }
     }
     std::vector<Entry> log_;
@@ -431,12 +559,16 @@ private:
     bool copy_mode_{};
     bool context_{};
     mutable std::size_t printed_entries_{}, printed_bytes_{};
-    mutable bool transcript_started_{}, stream_line_open_{}, input_visible_{};
+    mutable bool native_startup_emitted_{}, native_header_anchored_{}, stream_line_open_{};
     bool confirmation_visible_{};
     mutable std::string native_header_state_;
     mutable int native_header_width_{}, native_header_height_{}, native_screen_height_{};
     mutable int native_body_rows_{}, native_footer_gap_{};
-    mutable bool native_new_turn_{};
+    mutable LiveRegionState live_;
+    mutable bool native_anchor_lost_{}, native_plain_{};
+    mutable std::string native_plain_prompt_;
+    mutable arn::TerminalSize geometry_{};
+    mutable std::uint64_t geometry_generation_{1};
     mutable std::size_t native_line_columns_{};
 };
 

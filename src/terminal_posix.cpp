@@ -195,6 +195,16 @@ int TerminalSession::read_confirmation(const std::function<void(std::string_view
     return edit_confirmation([this, cancelled] { return read_event(cancelled); }, display);
 }
 
+void TerminalSession::discard_pending_input() {
+    interrupt_requested = 0;
+    tcflush(STDIN_FILENO, TCIFLUSH);
+}
+
+// POSIX owns its alternate-screen viewport and does not use native anchors.
+TerminalLiveAnchor TerminalSession::capture_live_anchor(int, int) const { return {}; }
+bool TerminalSession::live_anchor_valid(const TerminalLiveAnchor&) const { return false; }
+bool TerminalSession::begin_output_region() const { return false; }
+
 bool TerminalSession::native_scrollback() const noexcept { return false; }
 
 void TerminalSession::set_copy_mode(bool enabled) {
