@@ -1036,6 +1036,51 @@ void plain_prompt_and_banner_strip_controls() {
     check(capture.take().empty(), "An unchanged plain prompt line was printed again");
 }
 
+// --- Viewport: header names and the status line ---------------------------
+
+// Regression: the viewport wrote the header's provider and model names and
+// the status line unchanged. A model name can come from a provider's model
+// list or an ACP agent, and a status can quote an ACP agent's tool
+// description, so escape sequences, C1 controls and line breaks reached the
+// interactive terminal.
+void viewport_header_and_status_strip_controls() {
+    ViewportFixture fixture;
+    fixture.ui->session("Gem\x1b]0;X\x07" "ini", "model\x1b[2J\xC2\x9B\x9B" "name\r\n", true);
+    fixture.ui->status("ACP tool: evil\x1b[2J\x1b]0;T\x07\r\npath\xC0\xAF [y/N]");
+    fixture.ui->show_confirmation({});
+    auto frame = fixture.capture.take();
+    fixture.ui->show_confirmation("y"); // Redraws only the footer.
+    frame += fixture.capture.take();
+    fixture.screen.feed(frame);
+    for (const std::string_view hostile : {"\x1b]", "\x1b[2J", "\x07", "\xC2\x9B", "\x9B" "name", "\xC0\xAF"})
+        check(frame.find(hostile) == std::string::npos,
+              "A viewport frame passed a control character or malformed UTF-8 from a name or the status line");
+    check(strict_utf8(frame), "A viewport frame was not well-formed UTF-8");
+    check(fixture.screen.all().find("Provider: Gem]0;Xini · Model: model[2J" + replacement + "name · Context: active") !=
+              std::string::npos,
+          "The viewport header changed the visible provider or model name");
+    check(fixture.hint() == "ACP tool: evil[2J]0;Tpath" + replacement + replacement + " [y/N]",
+          "The viewport status line changed its visible text");
+    check(fixture.prompt() == "arn › y", "The footer lost the confirmation choice");
+}
+
+// Valid UTF-8 in the names and the status line reaches the viewport byte for
+// byte, including continuation bytes in 0x80..0x9F.
+void viewport_header_and_status_keep_valid_utf8() {
+    ViewportFixture fixture;
+    const std::string model = "модель-ї-你好-🙂👍🏽-e\xCC\x81";
+    const std::string status = "ACP tool: змінити «звіт.md» — Ёлка 你好 🙂 [y/N]";
+    fixture.ui->session("OmniRoute", model, false);
+    fixture.ui->status(status);
+    fixture.ui->show_confirmation({});
+    const auto frame = fixture.capture.take();
+    fixture.screen.feed(frame);
+    check(strict_utf8(frame), "A viewport frame was not well-formed UTF-8");
+    check(frame.find(model) != std::string::npos && frame.find(status) != std::string::npos,
+          "The viewport changed valid UTF-8 in a model name or the status line");
+    check(fixture.hint() == status, "The viewport status line changed valid text");
+}
+
 int main() {
     const std::pair<const char*, void(*)()> cases[] = {
         {"viewport_lifecycle_prints_once", viewport_lifecycle_prints_once},
@@ -1056,6 +1101,8 @@ int main() {
         {"plain_output_holds_split_utf8", plain_output_holds_split_utf8},
         {"plain_output_replaces_invalid_utf8", plain_output_replaces_invalid_utf8},
         {"plain_prompt_and_banner_strip_controls", plain_prompt_and_banner_strip_controls},
+        {"viewport_header_and_status_strip_controls", viewport_header_and_status_strip_controls},
+        {"viewport_header_and_status_keep_valid_utf8", viewport_header_and_status_keep_valid_utf8},
     };
     int failures = 0;
     for (const auto& [name, test] : cases) {
