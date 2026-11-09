@@ -84,8 +84,9 @@ void erase_last_utf8_character(std::string& text) {
 // renders afterwards.
 bool apply_view_event(Ui& ui, const arn::TerminalEvent& event) {
     switch (event.type) {
-    case arn::TerminalEventType::wheel_up: ui.scroll(3); return true;
-    case arn::TerminalEventType::wheel_down: ui.scroll(-3); return true;
+    // A Windows wheel record can hold several notches; POSIX reports one.
+    case arn::TerminalEventType::wheel_up: ui.scroll(3 * event.repeat_count); return true;
+    case arn::TerminalEventType::wheel_down: ui.scroll(-3 * event.repeat_count); return true;
     case arn::TerminalEventType::page_up: ui.scroll(8 * event.repeat_count); return true;
     case arn::TerminalEventType::page_down: ui.scroll(-8 * event.repeat_count); return true;
     case arn::TerminalEventType::end: ui.scroll_to_bottom(); return true;

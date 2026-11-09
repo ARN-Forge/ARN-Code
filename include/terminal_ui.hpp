@@ -49,11 +49,13 @@ inline tui::Scalar plain_scalar(std::string_view text, std::size_t index) {
     return scalar;
 }
 
-// One line of plain text (the prompt line, a provider or model name): valid
+// One line of text ARN does not control, for either presentation: the status
+// line (it can quote an ACP agent's tool description) and the provider and
+// model names (a model list comes from a provider or an ACP agent). Valid
 // UTF-8 byte for byte, U+FFFD for malformed bytes, and no control characters
 // at all (C0 including CR, LF and tab, DEL, C1), so no escape sequence or
 // line break survives.
-inline std::string plain_line(std::string_view text) {
+inline std::string safe_line(std::string_view text) {
     std::string out;
     for (std::size_t index = 0; index < text.size();) {
         const auto scalar = plain_scalar(text, index);
@@ -84,7 +86,9 @@ struct Entry { Tone tone; std::string text; };
 //    the startup banner once, new transcript text once, and the prompt line
 //    when it changes. It never moves the cursor or edits earlier output, and
 //    text it does not control passes plain_scalar() and drops control
-//    characters first (see append_native_text and plain_line).
+//    characters first (see append_native_text and safe_line).
+// In both, the status line and the header's provider and model names pass
+// safe_line().
 class Ui {
 public:
     explicit Ui(const arn::TerminalSession& terminal) : terminal_(terminal) {
@@ -253,12 +257,10 @@ public:
 private:
     // --- Plain output (redirected input or output) -------------------------
 
-    // `plain`: the names pass plain_line() (the plain banner). The viewport
-    // header keeps them as they are.
-    std::string session_text(bool plain = false) const {
-        const auto name = [&](const std::string& value) { return plain ? plain_line(value) : value; };
-        return std::string(dim) + "Provider: " + name(provider_) + " · Model: " +
-            (model_.empty() ? "not selected" : name(model_)) + " · Context: " +
+    // The header's session row (viewport header and plain banner).
+    std::string session_text() const {
+        return std::string(dim) + "Provider: " + safe_line(provider_) + " · Model: " +
+            (model_.empty() ? "not selected" : safe_line(model_)) + " · Context: " +
             (context_ ? "active" : "empty") + std::string(reset);
     }
 
@@ -292,7 +294,7 @@ private:
             }
             if (!pending.empty() && last < line.size()) line[last] += pending;
         };
-        draw_header(left, inner, height, paint, true);
+        draw_header(left, inner, height, paint);
         std::vector<std::string> lines;
         for (auto& row : cells) {
             while (!row.empty() && row.back() == " ") row.pop_back();
@@ -317,13 +319,13 @@ private:
     }
 
     // The prompt line, printed only when its text changes. A status can quote
-    // a model's request, so the line passes plain_line().
+    // a model's request, so the line passes safe_line().
     void print_plain_prompt() const {
         const auto text = current_hint();
         if (text == native_plain_prompt_) return;
         native_plain_prompt_ = text;
         if (stream_line_open_) std::cout << "\r\n";
-        std::cout << dim << plain_line(text) << reset << "\r\n" << std::flush;
+        std::cout << dim << safe_line(text) << reset << "\r\n" << std::flush;
         stream_line_open_ = false;
         native_line_columns_ = 0;
     }
@@ -405,8 +407,9 @@ private:
     std::string current_hint() const {
         if (copy_mode_) return "COPY MODE · Drag to select, then " + std::string(copy_shortcut) + " · F2 returns to scrolling";
 #ifdef _WIN32
-        // The Windows alternate screen does not read the mouse wheel.
-        if (!view_.follow) return "Scrolled up · PgDn or End returns to the latest message";
+        // Text selection differs between Windows hosts (see README), so the
+        // hint names only the keys and the wheel.
+        if (!view_.follow) return "Scrolled up · Wheel down, PgDn or End returns to the latest message";
 #else
         if (!view_.follow) return "Scrolled up · Wheel down or End returns to the latest message · Shift+drag selects text";
 #endif
@@ -464,7 +467,7 @@ private:
             std::cout << dim << horizontal_rule(static_cast<std::size_t>(width - 2)) << reset;
         }
         clear_line(footer + 2);
-        std::cout << dim << tui::fit_cells(current_hint(), width - 2) << reset;
+        std::cout << dim << tui::fit_cells(safe_line(current_hint()), width - 2) << reset;
         clear_line(footer + 1);
         std::cout << cyan << "arn" << amber << " › " << reset << tui::tail_cells(input_, width - 8);
     }
@@ -519,9 +522,8 @@ private:
         draw_header(left, width, height, at);
     }
 
-    // `plain`: drawn for the plain banner (see session_text).
     template<class Draw>
-    void draw_header(int left, int width, int height, Draw&& at, bool plain = false) const {
+    void draw_header(int left, int width, int height, Draw&& at) const {
         const std::string rule = horizontal_rule(static_cast<std::size_t>(width - 2));
         at(1, left, std::string(cyan) + "╭" + rule + "╮" + std::string(reset));
         for (int row = 2; row < height; ++row) { at(row, left, std::string(cyan) + "│" + std::string(reset)); at(row, left + width - 1, std::string(cyan) + "│" + std::string(reset)); }
@@ -544,7 +546,7 @@ private:
             at(7, left + 30, std::string(dim) + "Esc cancels · keys and context stay in memory" + std::string(reset));
         }
         if (height > 5) {
-            at(height - 1, left + 2, session_text(plain));
+            at(height - 1, left + 2, session_text());
         }
     }
     std::vector<Entry> log_;

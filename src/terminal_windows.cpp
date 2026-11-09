@@ -32,16 +32,39 @@ std::atomic_bool alternate_active{false};
 std::mutex deferred_mutex;
 std::vector<arn::TerminalEvent> deferred_view_events;
 
-void defer_view_key(const KEY_EVENT_RECORD& key) {
-    arn::TerminalEvent event;
-    switch (key.wVirtualKeyCode) {
-    case VK_PRIOR: event = {arn::TerminalEventType::page_up, {}, key.wRepeatCount}; break;
-    case VK_NEXT: event = {arn::TerminalEventType::page_down, {}, key.wRepeatCount}; break;
-    case VK_END: event = {arn::TerminalEventType::end, {}}; break;
-    default: return;
-    }
+void defer_view_event(arn::TerminalEvent event) {
     std::lock_guard lock(deferred_mutex);
     if (deferred_view_events.size() < 256) deferred_view_events.push_back(std::move(event));
+}
+
+void defer_view_key(const KEY_EVENT_RECORD& key) {
+    switch (key.wVirtualKeyCode) {
+    case VK_PRIOR: defer_view_event({arn::TerminalEventType::page_up, {}, key.wRepeatCount}); break;
+    case VK_NEXT: defer_view_event({arn::TerminalEventType::page_down, {}, key.wRepeatCount}); break;
+    case VK_END: defer_view_event({arn::TerminalEventType::end, {}}); break;
+    default: break;
+    }
+}
+
+// The vertical mouse wheel. One notch is WHEEL_DELTA (120); finer wheels and
+// touchpads report parts of a notch, which add up in `remainder` until they
+// make a whole one, and a change of direction drops what was left. Returns
+// the whole notches in this record (positive: wheel up, away from the user).
+// Every other mouse record (a move, a click, the horizontal wheel) gives 0.
+int wheel_steps(const MOUSE_EVENT_RECORD& mouse, int& remainder) {
+    if ((mouse.dwEventFlags & MOUSE_WHEELED) == 0) return 0;
+    const int delta = static_cast<SHORT>(HIWORD(mouse.dwButtonState));
+    if ((delta > 0 && remainder < 0) || (delta < 0 && remainder > 0)) remainder = 0;
+    remainder += delta;
+    const int steps = remainder / WHEEL_DELTA;
+    remainder -= steps * WHEEL_DELTA;
+    return steps;
+}
+
+// Several notches in one record become one event with a repeat count.
+arn::TerminalEvent wheel_event(int steps) {
+    return {steps > 0 ? arn::TerminalEventType::wheel_up : arn::TerminalEventType::wheel_down, {},
+            static_cast<std::uint16_t>(steps > 0 ? steps : -steps)};
 }
 
 void flush_console_input(HANDLE input) { FlushConsoleInputBuffer(input); }
@@ -104,18 +127,32 @@ struct TerminalSession::Impl {
     bool copy_mode{};
     wchar_t pending_high_surrogate{};
     WORD pending_surrogate_repeats{};
+    int wheel_remainder{}; // Part of a wheel notch read at the prompt (wheel_steps).
 
     void apply_input_mode() {
         if (!input_mode_changed) return;
-        // Use the normal screen buffer and let the host own wheel/selection.
-        // Quick Edit supplies selection in legacy conhost too. Keep processed
-        // Ctrl+C so Windows Terminal can consume it when a selection exists.
+        // The host owns the mouse (selection, wheel): Quick Edit supplies
+        // selection in legacy conhost too. The alternate screen then takes
+        // the wheel (apply_mouse_input); plain output keeps this mode. Keep
+        // processed Ctrl+C so Windows Terminal can consume it when a
+        // selection exists.
         DWORD mode = input_mode | ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE |
                      ENABLE_WINDOW_INPUT | ENABLE_PROCESSED_INPUT;
         mode &= ~(ENABLE_MOUSE_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT |
                   ENABLE_VIRTUAL_TERMINAL_INPUT);
         SetConsoleMode(input, mode);
         copy_mode = false;
+    }
+
+    // The alternate screen reads the mouse wheel: mouse input on and Quick
+    // Edit off, or the console would keep the mouse for selection. Dragging
+    // then no longer selects text: Windows Terminal selects with Shift+drag,
+    // the classic console window with Edit > Mark in its window menu. The
+    // destructor restores the original mode.
+    void apply_mouse_input() {
+        DWORD mode{};
+        if (!input_mode_changed || !GetConsoleMode(input, &mode)) return;
+        SetConsoleMode(input, (mode | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS) & ~ENABLE_QUICK_EDIT_MODE);
     }
 };
 
@@ -150,7 +187,10 @@ TerminalSession::TerminalSession() : impl_(std::make_unique<Impl>()) {
     }
     alternate_active.store(impl_->alternate);
 
+    // ARN reads console mouse records, never VT mouse reports: switch off any
+    // reporting another program left on, before asking for mouse input.
     std::cout << "\x1b[?1000l\x1b[?1006l" << std::flush;
+    if (impl_->alternate) impl_->apply_mouse_input();
 }
 
 TerminalSession::~TerminalSession() {
@@ -198,7 +238,11 @@ TerminalEvent TerminalSession::read_event(const std::atomic_bool* cancelled) {
         if (count == 0) continue;
 
         if (event.EventType == WINDOW_BUFFER_SIZE_EVENT) return {TerminalEventType::resize, {}};
-        if (event.EventType == MOUSE_EVENT) continue;
+        if (event.EventType == MOUSE_EVENT) {
+            if (const int steps = wheel_steps(event.Event.MouseEvent, impl_->wheel_remainder))
+                return wheel_event(steps);
+            continue;
+        }
         if (event.EventType != KEY_EVENT || !event.Event.KeyEvent.bKeyDown) continue;
 
         const auto& key = event.Event.KeyEvent;
@@ -287,6 +331,14 @@ struct TerminalCancellationMonitor::Impl {
     std::mutex input_mutex;
     std::condition_variable input_changed;
     bool input_paused{};
+    int wheel_remainder{}; // Only the monitor thread uses it.
+
+    // A mouse record during a request: the wheel scrolls (alternate screen
+    // only), and nothing a mouse does cancels.
+    void take_mouse(const MOUSE_EVENT_RECORD& mouse) {
+        if (const int steps = wheel_steps(mouse, wheel_remainder); steps && alternate_active.load())
+            defer_view_event(wheel_event(steps));
+    }
 
     Impl(std::atomic_bool& flag, std::function<void()> callback)
         : cancelled(flag), cancel_request(std::move(callback)) {
@@ -320,8 +372,23 @@ struct TerminalCancellationMonitor::Impl {
                                     (key.wVirtualKeyCode == 'C' && (key.dwControlKeyState &
                                         (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)));
                                 // Alternate screen: scrolling stays usable while
-                                // output arrives. The native renderer drops these.
+                                // output arrives. Plain output drops these.
                                 if (!cancel && alternate_active.load()) defer_view_key(key);
+                            } else if (received && record.EventType == MOUSE_EVENT) {
+                                take_mouse(record.Event.MouseEvent);
+                                // Moving the mouse queues a record per movement.
+                                // Take the mouse records queued behind this one
+                                // now, so a key after them (Esc) is not delayed.
+                                // A key stays queued for the next pass.
+                                for (int more = 0; more < 64; ++more) {
+                                    INPUT_RECORD next{};
+                                    DWORD peeked{};
+                                    if (!PeekConsoleInputW(input, &next, 1, &peeked) || peeked == 0 ||
+                                        next.EventType != MOUSE_EVENT ||
+                                        !ReadConsoleInputW(input, &next, 1, &peeked) || peeked == 0)
+                                        break;
+                                    take_mouse(next.Event.MouseEvent);
+                                }
                             }
                         }
                         cancel = cancel || interrupt_pending.exchange(false);

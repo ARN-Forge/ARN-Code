@@ -17,7 +17,10 @@ arn=$(readlink -f "$1")
 probe=$(readlink -f "$2")
 fake_server=$(readlink -f "$3")
 export LANG=${PTY_TEST_LOCALE:-C.UTF-8} LC_ALL=${PTY_TEST_LOCALE:-C.UTF-8}
-socket="arn_pty_$$"
+# Every section gets its own tmux server on a fresh socket (see start), so a
+# command can never reach a server that is still shutting down.
+socket=""
+sections=0
 state=$(mktemp -d)
 passes=0
 failures=0
@@ -76,15 +79,55 @@ wait_exit() {
 exit_code() { history | sed -n 's/^EXIT=\([0-9]*\).*/\1/p' | tail -1; }
 stty_restored() { [[ -s "$state/stty_before" ]] && cmp -s "$state/stty_before" "$state/stty_after"; }
 
+# A process has exited when ps no longer lists it, or lists it as a zombie
+# (a container whose init does not reap children keeps exited ones).
+process_gone() {
+    local stat
+    stat=$(ps -o stat= -p "$1" 2>/dev/null)
+    [[ -z $stat || $stat == Z* ]]
+}
+# Stops this section's tmux server (only this socket) and waits until its
+# process has exited, then removes the socket file, which tmux may leave
+# behind. Returns 1 if the server is still running after 10 seconds.
+retire() {
+    [[ -n $socket ]] || return 0
+    local pid path n
+    pid=$(t display -p '#{pid}' 2>/dev/null)
+    path=$(t display -p '#{socket_path}' 2>/dev/null)
+    t kill-server 2>/dev/null
+    for ((n = 0; n < 200; n++)); do
+        if [[ -z $pid ]] || process_gone "$pid"; then
+            [[ -n $path && -S $path ]] && rm -f "$path"
+            return 0
+        fi
+        sleep 0.05
+    done
+    return 1
+}
+cleanup() { retire; rm -rf "$state"; }
+trap cleanup EXIT
+# The tmux harness itself failed: nothing after this can be trusted, so stop
+# here and report it as a failure (never retried).
+harness_failed() {
+    failures=$((failures + 1))
+    echo "FAIL harness: $1"
+    echo "$passes passed, $failures failed"
+    exit 1
+}
+
 # A shell in a fresh tmux server of the given size, running one program.
 start() { # start width height command...
     local width=$1 height=$2
     shift 2
-    t kill-server 2>/dev/null
+    retire || harness_failed "the previous tmux server ($socket) did not exit"
+    sections=$((sections + 1))
+    socket="arn_pty_$$_$sections"
     rm -f "$state"/stty_*
-    t new-session -d -s pty -x "$width" -y "$height" "env PS1='$ ' bash --norc --noprofile"
+    t new-session -d -s pty -x "$width" -y "$height" "env PS1='$ ' bash --norc --noprofile" ||
+        harness_failed "tmux new-session failed on $socket"
+    t has-session -t pty 2>/dev/null || harness_failed "no tmux session on $socket"
     t set-option -g history-limit 20000
-    sleep 0.3
+    wait_row 1 '$' 100 || harness_failed "the shell prompt did not appear on $socket"
     # The marker is computed so the typed command line does not contain it.
     t send-keys -t pty "stty -g > $state/stty_before; echo before-arn-\$((40+2)); HOME='$state/home' ARN_KIRO_BIN='$state/kiro-cli' $*; echo EXIT=\$?; stty -g > $state/stty_after" Enter
 }
@@ -103,8 +146,14 @@ idle() {
     return 1
 }
 type_line() { idle; t send-keys -t pty -l "$1"; t send-keys -t pty Enter; }
-# Newest live arn (the container's init may leave exited ones as zombies).
-arn_pid() { ps -C arn -o pid=,stat= | awk '$2 !~ /Z/ {print $1}' | tail -1; }
+# The live arn started by this pane's shell, never one from another run (the
+# container's init may leave exited ones as zombies).
+arn_pid() {
+    local pid
+    for pid in $(pgrep -P "$(t display -p -t pty '#{pane_pid}')" -x arn); do
+        process_gone "$pid" || { echo "$pid"; return; }
+    done
+}
 
 # Layout for an alternate-screen frame of the given height (1-based rows).
 prompt_row() { echo $(($1 - 2)); }
@@ -347,7 +396,6 @@ clean_exit "exception" 1
 expect "exception: transcript once" once_in_history "probe-entry-1!"
 expect "exception: error reported after the transcript" bash -c "tmux -L $socket capture-pane -p -J -S - -t pty | grep -A3 'probe-entry-2!' | grep -qF 'probe caught: probe failure'"
 
-t kill-server 2>/dev/null
-rm -rf "$state"
+# cleanup (the EXIT trap) stops the last tmux server and removes $state.
 echo "$passes passed, $failures failed"
 ((failures == 0))

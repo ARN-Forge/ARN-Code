@@ -1,6 +1,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include "terminal.hpp"
+#include "terminal_posix_view.hpp"
 #include "cli_support.hpp"
 #include "terminal_ui.hpp"
 #include <chrono>
@@ -22,6 +23,17 @@ INPUT_RECORD key(WORD vk, wchar_t value, bool down = true, DWORD modifiers = 0, 
     record.EventType = KEY_EVENT;
     record.Event.KeyEvent = {static_cast<BOOL>(down), repeats, vk, 0, {}, modifiers};
     record.Event.KeyEvent.uChar.UnicodeChar = value;
+    return record;
+}
+
+// A console mouse record. For the wheels, `delta` is the signed high word of
+// dwButtonState (120 per notch; positive: forward or right).
+INPUT_RECORD mouse(DWORD flags, SHORT delta = 0, DWORD buttons = 0) {
+    INPUT_RECORD record{};
+    record.EventType = MOUSE_EVENT;
+    record.Event.MouseEvent.dwEventFlags = flags;
+    record.Event.MouseEvent.dwButtonState = static_cast<DWORD>(static_cast<WORD>(delta)) << 16 | buttons;
+    record.Event.MouseEvent.dwMousePosition = {10, 5};
     return record;
 }
 
@@ -72,6 +84,71 @@ void resize_records_are_delivered() {
     resize.Event.WindowBufferSizeEvent.dwSize.X = 99;
     write({resize});
     check(terminal.read_event().type == T::resize, "Changed resize record was not delivered");
+}
+
+// The vertical wheel scrolls: forward is wheel up, backward wheel down, and
+// one record with several notches is one event with a repeat count. Parts of
+// a notch (fine wheels, touchpads) add up; a change of direction drops them.
+// Moves, clicks and the horizontal wheel are ignored.
+void wheel_records_map_to_scroll_events() {
+    arn::TerminalSession terminal;
+    check(FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE)), "Could not clear setup events");
+    const auto expect = [&](T type, int count, const char* message) {
+        const auto event = editor_event(terminal);
+        check(event.type == type && event.repeat_count == count, message);
+    };
+    const auto expect_text = [&](const char* text, const char* message) {
+        const auto event = editor_event(terminal);
+        check(event.type == T::character && event.text == text, message);
+    };
+    write({mouse(MOUSE_WHEELED, 120), mouse(MOUSE_WHEELED, -120), mouse(MOUSE_WHEELED, 360),
+           mouse(MOUSE_WHEELED, -240)});
+    expect(T::wheel_up, 1, "A forward wheel notch did not scroll up");
+    expect(T::wheel_down, 1, "A backward wheel notch did not scroll down");
+    expect(T::wheel_up, 3, "Three notches in one record did not become one event of three");
+    expect(T::wheel_down, 2, "Two backward notches in one record did not become one event of two");
+
+    write({mouse(MOUSE_WHEELED, 40), mouse(MOUSE_WHEELED, 40), key('A', L'a')});
+    expect_text("a", "Two thirds of a notch scrolled");
+    write({mouse(MOUSE_WHEELED, 40)});
+    expect(T::wheel_up, 1, "Three thirds of a notch did not add up to one");
+
+    write({mouse(MOUSE_WHEELED, 60), mouse(MOUSE_WHEELED, -120)});
+    expect(T::wheel_down, 1, "A change of direction kept the earlier part of a notch");
+    write({mouse(MOUSE_WHEELED, -60), mouse(MOUSE_WHEELED, 60), key('B', L'b')});
+    expect_text("b", "Half a notch each way scrolled");
+    write({mouse(MOUSE_WHEELED, 60)});
+    expect(T::wheel_up, 1, "The part kept after a change of direction was wrong");
+
+    write({mouse(MOUSE_MOVED), mouse(MOUSE_HWHEELED, 120), mouse(MOUSE_HWHEELED, -360),
+           mouse(0, 0, FROM_LEFT_1ST_BUTTON_PRESSED), mouse(0), mouse(DOUBLE_CLICK, 0, FROM_LEFT_1ST_BUTTON_PRESSED),
+           mouse(0, 0, RIGHTMOST_BUTTON_PRESSED), key('Z', L'z')});
+    expect_text("z", "A move, a click or the horizontal wheel produced an event");
+}
+
+// During a request the monitor reads the console. The wheel never cancels,
+// and a burst of mouse records (every movement queues one) does not delay
+// Esc behind it. With plain output nothing is kept for the renderer.
+void monitor_mouse_records() {
+    arn::TerminalSession terminal;
+    std::atomic_bool cancelled = false;
+    std::atomic_bool callback = false;
+    arn::TerminalCancellationMonitor monitor(cancelled, [&] { callback.store(true); });
+    std::vector<INPUT_RECORD> burst;
+    for (int index = 0; index < 500; ++index)
+        burst.push_back(index % 50 == 0 ? mouse(MOUSE_WHEELED, index % 100 == 0 ? 120 : -120) : mouse(MOUSE_MOVED));
+    write(burst);
+    std::this_thread::sleep_for(200ms);
+    check(!cancelled.load() && !callback.load(), "The mouse wheel or movement cancelled a request");
+    write(burst);
+    const auto start = std::chrono::steady_clock::now();
+    write({key(VK_ESCAPE, 27)});
+    const auto deadline = start + 2s;
+    while (!callback.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
+    check(cancelled.load() && callback.load(), "Esc after a burst of mouse records did not cancel");
+    check(std::chrono::steady_clock::now() - start < 1s, "A burst of mouse records delayed Esc");
+    if (terminal.native_scrollback())
+        check(arn::take_deferred_view_events().empty(), "Plain output kept wheel events for the renderer");
 }
 
 void transcript_smoke(const char* executable) {
@@ -496,7 +573,6 @@ int main(int argc, char** argv) {
             arn::TerminalSession terminal;
             DWORD mode{};
             check(GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode), "No console mode");
-            check(!(mode & ENABLE_MOUSE_INPUT), "ARN still owns the mouse");
             check(!(mode & (ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)), "Input must be explicitly rendered");
             check(mode & ENABLE_PROCESSED_INPUT, "Selection-aware Ctrl+C must remain processed");
             // Standard output here is the caller's (a pipe or a file under
@@ -505,6 +581,14 @@ int main(int argc, char** argv) {
             const bool console_output = GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &output_mode) != FALSE;
             check(terminal.native_scrollback() == !console_output && !terminal.copy_mode(),
                   "Redirected output did not select plain output");
+            // Plain output leaves the mouse to the host (Quick Edit selects);
+            // the alternate screen reads the wheel instead.
+            if (terminal.native_scrollback())
+                check(!(mode & ENABLE_MOUSE_INPUT) && (mode & ENABLE_QUICK_EDIT_MODE),
+                      "Plain output took the mouse from the host");
+            else
+                check((mode & ENABLE_MOUSE_INPUT) && !(mode & ENABLE_QUICK_EDIT_MODE),
+                      "The alternate screen does not read the mouse wheel");
 
             check(FlushConsoleInputBuffer(console_input), "Could not clear console setup events");
             INPUT_RECORD resize{};
@@ -579,6 +663,10 @@ int main(int argc, char** argv) {
                                    key(VK_RETURN, 0)}, 'n', {"", "y", "", "n"});
             confirmation(terminal, {key(VK_ESCAPE, 27)}, 27, {""});
             confirmation(terminal, {key('C', 3, true, LEFT_CTRL_PRESSED)}, 3, {""});
+            // The mouse never answers, edits or cancels a decision.
+            confirmation(terminal, {mouse(MOUSE_WHEELED, 120), key('Y', L'y'), mouse(MOUSE_MOVED),
+                                   mouse(MOUSE_WHEELED, -240), mouse(0, 0, FROM_LEFT_1ST_BUTTON_PRESSED),
+                                   key(VK_RETURN, 0)}, 'y', {"", "y"});
 
             // ACP EOF/shutdown cancels a pending decision without requiring a
             // new console event. A typed y without Enter must not grant access.
@@ -663,6 +751,10 @@ int main(int argc, char** argv) {
               "Windows console code pages were not restored");
         check(captured.str().find("1049h") == std::string::npos, "Windows still enters alternate screen");
         resize_records_are_delivered();
+        wheel_records_map_to_scroll_events();
+        monitor_mouse_records();
+        check(GetConsoleMode(console_input, &restored_mode) && restored_mode == original_mode,
+              "Windows console input mode was not restored after the wheel tests");
         if (argc > 1) {
             transcript_smoke(argv[1]);
             redirected_stdin_smoke(argv[1]);
