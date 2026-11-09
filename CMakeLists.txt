@@ -12,9 +12,6 @@ endif()
 
 include(FetchContent)
 
-# cpp-httplib discovers OpenSSL through CMake when this option is enabled.
-set(HTTPLIB_REQUIRE_OPENSSL ON CACHE BOOL "Build cpp-httplib with OpenSSL support" FORCE)
-
 FetchContent_Declare(
     nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
@@ -22,14 +19,10 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 
-FetchContent_Declare(
-    cpp_httplib
-    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-    GIT_TAG v0.18.3
-    GIT_SHALLOW TRUE
-)
-
-FetchContent_MakeAvailable(nlohmann_json cpp_httplib)
+# cpp-httplib comes only from ARN Core, which ships a patched copy (per-request
+# cancellation). Declaring another copy here would stop ARN Core from
+# configuring, because two copies would disagree on httplib::Request.
+FetchContent_MakeAvailable(nlohmann_json)
 
 find_package(Threads REQUIRED)
 
