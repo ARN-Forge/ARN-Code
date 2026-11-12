@@ -55,6 +55,19 @@ The installer uses `%LOCALAPPDATA%\Arn\bin`, adds it to your user `PATH`, and
 verifies the installed executable. Open a new terminal if `arn` is not yet
 visible in another terminal window.
 
+To install a specific release instead of the latest, set `ARN_VERSION` first
+(`0.9.0` and `v0.9.0` both select tag `v0.9.0`). This works for v0.9.0 and
+later; earlier releases have no `SHA256SUMS` (see
+[Release checksums](#release-checksums)).
+
+```powershell
+$env:ARN_VERSION = "0.9.0"
+irm https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.ps1 | iex
+Remove-Item Env:\ARN_VERSION
+```
+
+A downloaded copy of the script also takes `-Version 0.9.0`.
+
 ### Linux and macOS
 
 ```bash
@@ -66,6 +79,189 @@ The script installs to `~/.local/bin`, adds that directory to your shell
 profile when needed, and verifies the executable. Unix archives use system
 OpenSSL libraries: on Linux install the OpenSSL runtime supplied by your
 distribution; on macOS run `brew install openssl@3` first.
+
+To install a specific release (v0.9.0 or later) instead of the latest:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.sh | ARN_VERSION=0.9.0 sh
+```
+
+### Updating
+
+Run the install command again. The new release is downloaded, checked against
+`SHA256SUMS`, extracted and test-run in a temporary location first; a failed
+download, checksum, extraction or version check leaves the installed version
+exactly as it was.
+
+- **Windows:** the new files are staged in a hidden `.arn-staging-*` directory
+  next to the install directory (on the same volume). ARN's current files are
+  then moved aside to `.arn-backup-*`, the new files moved in, and the
+  installed `arn.exe --version` and `PATH` lookup checked. If any of that
+  fails, the new files are taken out and the previous ones moved back, and the
+  user `PATH` is put back exactly as it was. An open ARN does not block an
+  update (Windows allows renaming a running executable); its old files stay
+  in `.arn-backup-*` until a later installation removes them. A file another
+  program locks is retried briefly and otherwise reported, and the previous
+  version is restored.
+- **Linux and macOS:** `arn` is staged in a hidden `.arn-install.*` directory
+  inside the install directory and replaced with a single rename, so `arn` is
+  always either the old or the new executable. Copies of the previous
+  executable and manifest are kept until the new one passes its checks, and
+  are put back if they fail or the installer is stopped by a signal (it then
+  exits with a non-zero status). Your shell profile is edited by writing a new
+  copy next to it and renaming it into place, keeping its permissions and any
+  symbolic link to it; if the profile cannot be updated, or changed while it
+  was being updated, `arn` is still installed and the installer prints the
+  `PATH` line to add yourself.
+
+**Interrupted updates.** Updating is not one atomic operation (Windows moves
+several files one by one), so each run first writes a transaction record into
+the install directory (`.arn-transaction.json` on Windows,
+`.arn-install-transaction` on Linux and macOS) and updates it as it goes. If a
+run is killed, crashes or loses power part-way, the next run of the installer
+(install or uninstall) finds the record and, before doing anything else, puts
+the previous installation back; a fresh installation is removed again. This
+recovery can itself be interrupted and repeated. A backup is only deleted once
+its installation has committed. Two installers running at the same time into
+the same directory are not supported.
+
+**When recovery stops.** Recovery does not force its way through. If it finds
+something it cannot account for, it stops and names it, for example:
+
+- a missing work directory (`.arn-staging-*` on Windows, `.arn-install.*` on
+  Linux and macOS) that it needs to tell its own files from others;
+- a transaction record that is damaged or belongs to another directory;
+- on Windows, a file of yours where it would put a previous file back, a file
+  with a package name where the installation had not got to yet, or a manifest
+  that it cannot show it wrote itself.
+
+On Windows every condition is checked first, so a stopped recovery has changed
+nothing. On Linux and macOS a missing work directory or an unusable record also
+stops it before any change; if one restore step fails, the steps that succeeded
+are kept, and they are safe to repeat. In every case the transaction record and
+the backup (`.arn-backup-*` next to the install directory on Windows, the
+`.arn-install.*` work directory on Linux and macOS) are kept: they may hold the
+only copy of your previous version. Do what the message says (typically, move
+a file of yours that it names out of the install directory), then run the
+installer again. For a damaged record the message explains how to put the
+previous files back by hand. Do not delete `.arn-*` files or directories, the
+record or the manifest to get past the message.
+
+On Windows, the user `PATH` keeps its registry type (`REG_EXPAND_SZ` stays
+`REG_EXPAND_SZ`) and `%VARIABLE%` references in other entries stay unexpanded;
+the installer only adds or removes its own entry and never reorders others.
+
+**Installation manifest.** Every successful installation writes a manifest
+listing the files it installed (`install-manifest.json` on Windows,
+`.arn-install-manifest` on Linux and macOS), together with the version, the
+build commit, the install directory and whether the installer added the
+directory to `PATH`. Only files a manifest lists are ever replaced or removed.
+Other files you keep in the install directory are never touched. A manifest
+that is malformed, lists anything but plain file names in that directory,
+belongs to a different directory or is a link makes the installer stop without
+changing anything.
+
+**Older installations.** The installer never guesses which existing files are
+ARN's; files that no manifest records are only replaced when you say so.
+
+- **Windows, installed with the scripts of v0.7.0 or later:** those scripts
+  wrote `install-manifest.json` as a plain list of file names. That older
+  format is still read, so these installations update and uninstall normally.
+- **Windows, installed with the scripts of v0.5 or v0.6:** these wrote no
+  manifest. An update stops and names the files it would replace; uninstall
+  also refuses. If they are ARN Code's, take them over once:
+
+  ```powershell
+  $env:ARN_ADOPT_EXISTING = "1"
+  irm https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.ps1 | iex
+  Remove-Item Env:\ARN_ADOPT_EXISTING
+  ```
+
+  (or `-AdoptExisting` with a downloaded copy). Only files with the names of
+  the package's files are replaced and recorded; anything else in the
+  directory stays as it is. After that, update and uninstall work normally.
+- **Linux and macOS:** installers before this one did not record their files,
+  so an existing `arn` without a manifest is not replaced or removed. If it is
+  ARN Code, take it over once with:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.sh | ARN_ADOPT_EXISTING=1 sh
+  ```
+
+### Uninstall
+
+```powershell
+# Windows PowerShell
+$env:ARN_UNINSTALL = "1"
+irm https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.ps1 | iex
+Remove-Item Env:\ARN_UNINSTALL
+```
+
+```bash
+# Linux and macOS
+curl -fsSL https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.sh | ARN_UNINSTALL=1 sh
+```
+
+A downloaded copy of `install.ps1` also takes `-Uninstall`. Set
+`ARN_INSTALL_DIR` (or `-InstallDir`) to the same value as when installing if
+you used a different directory.
+
+Uninstall removes only the files the manifest lists and the manifest itself.
+Everything else in the directory stays. It removes the install directory only
+if it is then empty (on Linux and macOS, only if the installer created it; the
+shared `~/.local/bin` normally stays). It takes out only the `PATH` entry the
+installer added: the user `PATH` entry equal to the install directory on
+Windows, or the two lines starting with `# Added by ARN Code installer:` in
+your shell profile, provided you have not changed them. Running it again when
+nothing is installed does nothing.
+
+It checks every listed file before removing any, and refuses without changing
+anything when there is no manifest but `arn` is present, when the manifest is
+invalid, or when a listed file has been replaced by a link or directory. If a
+file cannot be removed (on Windows, usually because ARN is still running),
+uninstall reports it as incomplete, keeps it in the manifest and leaves `PATH`
+unchanged. Close ARN and run it again. The `PATH` entry is removed only after
+all files, and the manifest last, so an uninstall that is interrupted can
+simply be run again.
+
+To clean up by hand, first make sure no installation was interrupted: if the
+install directory has a transaction record (`.arn-transaction.json` on Windows,
+`.arn-install-transaction` on Linux and macOS), run the installer once and
+follow its message instead (see **When recovery stops**). Otherwise delete only
+the files the manifest lists, then the manifest (`install-manifest.json` on
+Windows, `.arn-install-manifest` on Linux and macOS), and remove the install
+directory from your user `PATH` (Windows) or the two
+`# Added by ARN Code installer:` lines from your shell profile.
+
+### Release checksums
+
+Every release publishes `SHA256SUMS`, a list of the SHA-256 of each release
+file. Both install scripts download it from the same release as the archive
+and check the archive against it before extracting or running anything. If
+`SHA256SUMS` is missing, malformed, lacks or repeats the archive's entry, or
+the hash differs, nothing is installed. Releases published before
+`SHA256SUMS` existed (v0.8.0 and earlier) cannot be installed by these scripts.
+
+To check a manual download, put `SHA256SUMS` from the same release page next
+to it and run:
+
+```powershell
+# Windows PowerShell: the two values must match.
+(Get-FileHash .\arn-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
+Select-String -Path .\SHA256SUMS -Pattern ' arn-windows-x64\.zip$'
+```
+
+```bash
+# Linux: prints "arn-linux-x64.tar.gz: OK" when it matches.
+grep ' arn-linux-x64.tar.gz$' SHA256SUMS | sha256sum --check
+# macOS (use arn-macos-x64.tar.gz on Intel):
+grep ' arn-macos-arm64.tar.gz$' SHA256SUMS | shasum -a 256 --check
+```
+
+A checksum detects a damaged or mixed-up download. It is not a signature:
+`SHA256SUMS` is unsigned and is published beside the archives, so someone who
+could replace a release archive could replace `SHA256SUMS` too. It does not
+prove who published the release.
 
 ### Manual download
 
@@ -82,6 +278,14 @@ Available release archives are:
 - **Linux x64 CLI:** `arn-linux-x64.tar.gz`
 - **macOS Apple Silicon CLI:** `arn-macos-arm64.tar.gz`
 - **macOS Intel CLI:** `arn-macos-x64.tar.gz`
+
+The Windows CLI archive runs on Windows 10 and 11 x64 without a separate
+Visual C++ Redistributable: next to `arn.exe` it carries the OpenSSL DLLs and
+the Microsoft Visual C++ runtime DLLs that `arn.exe` imports (for example
+`vcruntime140.dll` and `msvcp140.dll`). Those runtime files are copied
+unchanged, Microsoft-signed, from Visual Studio's redistributable folder for
+the compiler that built the release (app-local deployment). Windows Update
+does not service app-local copies; they are updated with each ARN release.
 
 ## First request
 
@@ -230,6 +434,11 @@ Core package, otherwise fetches the pinned canonical Core revision. For a releas
 build, use a clean checkout without an adjacent Core checkout or installed Core
 package so developer changes cannot override the pin.
 
+`arn --version` names the version and the source commit, for example
+`arn 0.9.0 (1a2b3c4d5e6f)`. A local build with uncommitted changes to tracked
+files adds `-dirty`. A build from a source copy without Git metadata reports
+`(unknown)` unless you pass the commit with `-DARN_BUILD_COMMIT=<sha>`.
+
 Clone the canonical repository first:
 
 ```bash
@@ -320,5 +529,6 @@ automatic model routing, and isolated subagents remain planned concepts.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow,
 [SECURITY.md](SECURITY.md) for vulnerability reporting, and
-[docs/releases/v0.8.0.md](docs/releases/v0.8.0.md) for the v0.8.0 release
-notes. The project is released under the [MIT License](LICENSE).
+[docs/releases/v0.9.0.md](docs/releases/v0.9.0.md) for the v0.9.0 release
+notes (earlier releases are in [docs/releases](docs/releases)). The project is
+released under the [MIT License](LICENSE).

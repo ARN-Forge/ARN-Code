@@ -53,17 +53,95 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      # Which shells the tests below really use: CTest runs the installer tests
+      # with the bash and PowerShell that CMake found, and install.sh runs as sh.
+      - name: Show shell and PowerShell versions
+        shell: bash
+        run: |
+          echo "bash on PATH: $(command -v bash) - $(bash --version | head -n 1)"
+          if [ -x /bin/bash ]; then echo "/bin/bash: $(/bin/bash --version | head -n 1)"; fi
+          ls -l /bin/sh /var/select/sh 2>/dev/null || true
+          echo "sh reports BASH_VERSION='$(sh -c 'echo "${BASH_VERSION:-}"')'"
+          echo "sha256sum: $(command -v sha256sum || echo none), shasum: $(command -v shasum || echo none)"
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "pwsh: $(pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')"
+            echo "Windows PowerShell: $(powershell -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')"
+          fi
+          grep -E '^ARN_(BASH|POWERSHELL)_EXECUTABLE' build/CMakeCache.txt || true
+
+      # The Windows installer tests must run under PowerShell 7, not fall back
+      # to Windows PowerShell 5.1; every script must also parse in PowerShell 7.
+      - name: Check PowerShell 7 coverage
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSVersion.Major -lt 7) { throw "pwsh is $($PSVersionTable.PSVersion), not PowerShell 7." }
+          $chosen = (Select-String -Path build/CMakeCache.txt -Pattern '^ARN_POWERSHELL_EXECUTABLE:[A-Z]+=(.*)$').Matches[0].Groups[1].Value
+          if ([IO.Path]::GetFileName($chosen) -ne 'pwsh.exe') { throw "CTest would run the PowerShell tests with '$chosen', not pwsh.exe." }
+          $failed = 0
+          foreach ($file in @(Get-ChildItem scripts, tests -Filter *.ps1)) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors)
+            foreach ($e in @($errors)) { Write-Host "::error file=$($file.Name),line=$($e.Extent.StartLineNumber)::$($e.Message)"; $failed++ }
+          }
+          if ($failed) { throw "$failed PowerShell 7 parse error(s)." }
+          Write-Host "PowerShell $($PSVersionTable.PSVersion) parses every script; CTest uses $chosen."
+
       - name: Model list regression tests
         run: ctest --test-dir build -C Release --output-on-failure
 
-      - name: Smoke test Windows executable
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: .\build\Release\arn.exe --version
+      # The executable must start and name the commit it was built from.
+      - name: Smoke test executable and build identity
+        shell: bash
+        run: |
+          if [ -x build/Release/arn.exe ]; then arn=build/Release/arn.exe; else arn=build/arn; fi
+          actual="$("$arn" --version | tr -d '\r')"
+          echo "$actual"
+          if [[ ! "$actual" =~ ^arn\ [0-9]+\.[0-9]+\.[0-9]+\ \(${GITHUB_SHA:0:12}\)$ ]]; then
+            echo "::error::'$actual' does not name commit ${GITHUB_SHA:0:12}."
+            exit 1
+          fi
 
-      - name: Smoke test Unix executable
+      # The same packaging and verification the release workflow uses, on
+      # every push, without publishing anything: the archive holds exactly
+      # arn, LICENSE and README.md, and the extracted arn, run with a minimal
+      # environment, reports the CMake version and this commit. On macOS the
+      # script runs with the system /bin/bash (3.2).
+      - name: Package and verify Unix archive (not published)
         if: runner.os != 'Windows'
-        run: ./build/arn --version
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then script_bash=/bin/bash; else script_bash=bash; fi
+          version="$(tr -d '\r' < CMakeLists.txt | sed -n 's/^project([A-Za-z]* VERSION \([0-9][0-9.]*\) .*/\1/p')"
+          echo "CMake version: $version; packaging with $("$script_bash" --version | head -n 1)"
+          "$script_bash" scripts/package-unix.sh package --binary build/arn --name arn-ci \
+            --archive arn-ci.tar.gz --version "$version" --commit "$GITHUB_SHA"
+          "$script_bash" scripts/package-unix.sh verify --archive arn-ci.tar.gz --name arn-ci \
+            --version "$version" --commit "$GITHUB_SHA"
+          tar -tzvf arn-ci.tar.gz
+          rm -f arn-ci.tar.gz
+
+      # macOS ships Bash 3.2 as /bin/bash (and as /bin/sh). CTest may pick a
+      # newer bash from Homebrew, so the shell scripts and their tests also run
+      # here with /bin/bash itself; install.sh runs as sh in these tests.
+      - name: Unix scripts and installer tests with Bash 3.2
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          major_minor="$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"')"
+          /bin/bash --version | head -n 1
+          if [ "$major_minor" != 3.2 ]; then echo "::error::/bin/bash is $major_minor, not 3.2."; exit 1; fi
+          for script in scripts/install.sh scripts/package-unix.sh tests/install_unix_test.sh \
+                        tests/install_unix_upgrade_test.sh tests/install_unix_recovery_test.sh tests/package_unix_test.sh; do
+            /bin/bash -n "$script"
+          done
+          /bin/sh -n scripts/install.sh
+          /bin/bash tests/package_unix_test.sh scripts/package-unix.sh "$(command -v python3)"
+          for test in install_unix_test install_unix_upgrade_test install_unix_recovery_test; do
+            echo "::group::$test with /bin/bash"
+            /bin/bash "tests/$test.sh" scripts/install.sh
+            echo "::endgroup::"
+          done
 
   # One Debug build with AddressSanitizer and UndefinedBehaviorSanitizer runs
   # every test, including the POSIX terminal UI on a real pseudo-terminal

@@ -21,7 +21,9 @@ function run(args, input) {
 }
 test('deployed backend loads with only Windows on PATH', () => {
   const version = JSON.parse(readFileSync(path.join(root, 'ide/src-tauri/tauri.conf.json'))).version;
-  assert.equal(run(['--version']).trim(), `arn ${version}`);
+  const escaped = version.replaceAll('.', '\\.');
+  assert.match(run(['--version']).trim(),
+    new RegExp(`^arn ${escaped} \\(([0-9a-f]{12}(-dirty)?|unknown)\\)$`));
 });
 test('deployed server starts in a separate project and handles EOF', () => {
   const messages = run(['--server'], '').trim().split(/\r?\n/).map(s => JSON.parse(s));

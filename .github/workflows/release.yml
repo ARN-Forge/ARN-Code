@@ -9,8 +9,26 @@ permissions:
   contents: write
 
 jobs:
+  # Runs before any build. Fails unless this run is for a vX.Y.Z tag that
+  # matches the CLI and IDE versions and has release notes, so a manual run on
+  # a branch such as main can never publish a release named after the branch.
+  preflight:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag, versions and release notes
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: cmake "-DREF_TYPE=$REF_TYPE" "-DREF_NAME=$REF_NAME" -P scripts/release-preflight.cmake
+
   build:
     name: Package ${{ matrix.name }}
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -65,30 +83,56 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Package Windows
+      # The release binary must name exactly the tagged version and commit.
+      - name: Check build identity
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ -x build/Release/arn.exe ]; then arn=build/Release/arn.exe; else arn=build/arn; fi
+          expected="arn ${REF_NAME#v} (${GITHUB_SHA:0:12})"
+          actual="$("$arn" --version | tr -d '\r')"
+          echo "$actual"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Expected '$expected', got '$actual'."
+            exit 1
+          fi
+
+      # The same build tree and configuration that is packaged below.
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      # Checks the ZIP's entries and DLL dependencies, then runs the arn.exe
+      # extracted from it with only System32 on PATH; the version and commit
+      # must match the tag. A package that fails is deleted.
+      - name: Package and verify Windows ZIP
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
           ./scripts/package-windows.ps1 `
             -BuildDir build/Release `
             -OutputDir arn-windows-x64 `
-            -ArchivePath arn-windows-x64.zip
-          $smoke = Join-Path $env:RUNNER_TEMP 'arn-cli-package-smoke'
-          Expand-Archive arn-windows-x64.zip $smoke
-          $oldPath = $env:PATH
-          try {
-            $env:PATH = Join-Path $env:SystemRoot 'System32'
-            & "$smoke/arn.exe" --version
-            if ($LASTEXITCODE -ne 0) { throw 'Packaged ARN failed outside the build tree.' }
-          } finally { $env:PATH = $oldPath }
+            -ArchivePath arn-windows-x64.zip `
+            -ExpectedVersion ($env:REF_NAME.Substring(1)) `
+            -ExpectedCommit $env:GITHUB_SHA
 
-      - name: Package Unix
+      # Archives exactly arn, LICENSE and README.md, checks the entries, runs
+      # the extracted arn with a minimal environment against the tag's version
+      # and commit, and lists its shared libraries. A package that fails is deleted.
+      - name: Package and verify Unix archive
         if: runner.os != 'Windows'
         shell: bash
-        run: |
-          mkdir "${{ matrix.artifact }}"
-          cp build/arn LICENSE README.md "${{ matrix.artifact }}/"
-          tar -czf "${{ matrix.archive }}" "${{ matrix.artifact }}"
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: >-
+          bash scripts/package-unix.sh package
+          --binary build/arn
+          --name "${{ matrix.artifact }}"
+          --archive "${{ matrix.archive }}"
+          --version "${REF_NAME#v}"
+          --commit "$GITHUB_SHA"
 
       - name: Upload package
         uses: actions/upload-artifact@v4
@@ -99,6 +143,7 @@ jobs:
 
   ide-windows:
     name: Package Windows IDE
+    needs: preflight
     runs-on: windows-latest
     env:
       CARGO_BUILD_JOBS: '1'
@@ -171,16 +216,31 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: [build, ide-windows]
+    needs: [preflight, build, ide-windows]
+    # Defence in depth: preflight already refuses non-tag runs.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # One directory per artifact, so two artifacts with the same file name
+      # cannot silently overwrite each other; release-checksums.cmake rejects it.
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
           pattern: release-*
-          path: dist
-          merge-multiple: true
+          path: artifacts
+
+      # Exactly these assets are published, each listed once in SHA256SUMS.
+      - name: Collect assets and write SHA256SUMS
+        run: >-
+          cmake -DARTIFACTS_DIR=artifacts -DDIST_DIR=dist
+          "-DEXPECTED=arn-windows-x64.zip;arn-linux-x64.tar.gz;arn-macos-arm64.tar.gz;arn-macos-x64.tar.gz;arn-ide-windows-x64.zip;arn-ide-windows-x64-setup.exe"
+          -P scripts/release-checksums.cmake
+
+      # An independent implementation must agree with every manifest line.
+      - name: Check SHA256SUMS with sha256sum
+        working-directory: dist
+        run: sha256sum --check --strict SHA256SUMS
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ArnAgentCode VERSION 0.8.0 LANGUAGES CXX)
+project(ArnAgentCode VERSION 0.9.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -68,8 +68,35 @@ else()
     set(ARN_TERMINAL_SOURCE src/terminal_posix.cpp)
 endif()
 
+# Build identity: `arn --version` prints the version and the source commit.
+# cmake/ArnBuildInfo.cmake regenerates arn_build_info.hpp on every build (only
+# rewriting it when it changes), so a new commit or local edit is never shown
+# with a stale identity. Without Git it reports "unknown"; packagers can pass
+# the commit explicitly with -DARN_BUILD_COMMIT=<sha>.
+find_package(Git QUIET)
+set(ARN_BUILD_COMMIT "" CACHE STRING
+    "Source commit for arn --version when the source tree has no Git metadata (12-40 hex digits)")
+set(ARN_BUILD_INFO_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(_arn_build_info_command
+    "${CMAKE_COMMAND}"
+    "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+    "-DOUTPUT=${ARN_BUILD_INFO_DIR}/arn_build_info.hpp"
+    "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+    "-DEXPLICIT_COMMIT=${ARN_BUILD_COMMIT}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ArnBuildInfo.cmake")
+execute_process(COMMAND ${_arn_build_info_command} RESULT_VARIABLE _arn_build_info_result)
+if (NOT _arn_build_info_result EQUAL 0)
+    message(FATAL_ERROR "Could not determine the ARN build identity.")
+endif()
+add_custom_target(arn_build_info
+    COMMAND ${_arn_build_info_command}
+    BYPRODUCTS "${ARN_BUILD_INFO_DIR}/arn_build_info.hpp"
+    COMMENT "Checking the ARN build identity"
+    VERBATIM)
+
 add_executable(arn
     src/main.cpp
+    src/build_info.cpp
     src/model_provider.cpp
     src/normal_chat.cpp
     src/api_client.cpp
@@ -86,11 +113,28 @@ add_executable(arn
     ${ARN_TERMINAL_SOURCE}
 )
 
-target_include_directories(arn PRIVATE include)
+target_include_directories(arn PRIVATE include "${ARN_BUILD_INFO_DIR}")
 target_compile_definitions(arn PRIVATE ARN_VERSION="${PROJECT_VERSION}")
+add_dependencies(arn arn_build_info)
 target_link_libraries(arn PRIVATE arn::core nlohmann_json::nlohmann_json Threads::Threads)
 if (MSVC)
     target_compile_options(arn PRIVATE /utf-8)
+
+    # The Windows CLI package ships the Visual C++ runtime next to arn.exe
+    # (app-local deployment, scripts/package-windows.ps1). Its only source is
+    # Visual Studio's redistributable folder for this compiler
+    # (VC\Redist\MSVC\<version>\x64\Microsoft.VC14x.CRT), which CMake's
+    # InstallRequiredSystemLibraries locates; no install rules are added.
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+    set(CMAKE_INSTALL_UCRT_LIBRARIES FALSE)
+    set(CMAKE_INSTALL_DEBUG_LIBRARIES FALSE)
+    include(InstallRequiredSystemLibraries)
+    set(ARN_MSVC_RUNTIME_DIR "${MSVC_CRT_DIR}" CACHE INTERNAL
+        "Visual C++ redistributable CRT folder that the Windows CLI package uses")
+    if (NOT EXISTS "${MSVC_CRT_DIR}/vcruntime140.dll")
+        message(WARNING "Visual Studio's redistributable Visual C++ runtime was not found "
+                        "('${MSVC_CRT_DIR}'); scripts/package-windows.ps1 cannot package arn.exe.")
+    endif()
 endif()
 
 if (BUILD_TESTING)
@@ -201,8 +245,70 @@ if (BUILD_TESTING)
             COMMAND ${ARN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
                     -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_windows_test.ps1
                     -BuildDir $<TARGET_FILE_DIR:arn>)
-        set_tests_properties(windows_install PROPERTIES TIMEOUT 45)
+        # Both skip (77) for a Debug build, whose debug runtime cannot ship.
+        set_tests_properties(windows_install PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77)
+        # Release ZIP verification (scripts/verify-windows-package.ps1).
+        add_test(NAME windows_package_verification
+            COMMAND ${ARN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/package_windows_test.ps1
+                    -BuildDir $<TARGET_FILE_DIR:arn>)
+        set_tests_properties(windows_package_verification PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+        # SHA256SUMS verification and version selection in scripts/install.ps1.
+        add_test(NAME windows_install_checksums
+            COMMAND ${ARN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_checksum_test.ps1
+                    -BuildDir $<TARGET_FILE_DIR:arn>)
+        set_tests_properties(windows_install_checksums PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+        # Upgrade, rollback, installation manifest and uninstall in scripts/install.ps1.
+        add_test(NAME windows_install_upgrade
+            COMMAND ${ARN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_upgrade_test.ps1
+                    -BuildDir $<TARGET_FILE_DIR:arn>)
+        set_tests_properties(windows_install_upgrade PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+        # Crash recovery, PATH handling and uninstall preflight in scripts/install.ps1.
+        add_test(NAME windows_install_recovery
+            COMMAND ${ARN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_recovery_test.ps1
+                    -BuildDir $<TARGET_FILE_DIR:arn>)
+        set_tests_properties(windows_install_recovery PROPERTIES TIMEOUT 400 SKIP_RETURN_CODE 77)
+    else()
+        # Release tar.gz packaging and verification (scripts/package-unix.sh);
+        # Python writes the malformed test archives.
+        find_program(ARN_BASH_EXECUTABLE NAMES bash)
+        if (Python3_FOUND AND ARN_BASH_EXECUTABLE)
+            add_test(NAME unix_package_verification
+                COMMAND ${ARN_BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/package_unix_test.sh
+                        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package-unix.sh ${Python3_EXECUTABLE})
+            set_tests_properties(unix_package_verification PROPERTIES TIMEOUT 120)
+        else()
+            message(STATUS "Python 3 or bash not found: the unix_package_verification test is not registered")
+        endif()
+        # SHA256SUMS verification and version selection in scripts/install.sh;
+        # skips (77) where install.sh has no release for the platform.
+        if (ARN_BASH_EXECUTABLE)
+            add_test(NAME unix_install_checksums
+                COMMAND ${ARN_BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_unix_test.sh
+                        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install.sh)
+            set_tests_properties(unix_install_checksums PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+            # Upgrade, rollback, installation manifest and uninstall in scripts/install.sh.
+            add_test(NAME unix_install_upgrade
+                COMMAND ${ARN_BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_unix_upgrade_test.sh
+                        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install.sh)
+            set_tests_properties(unix_install_upgrade PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+            # Crash recovery, signal handling and profile safety in scripts/install.sh.
+            add_test(NAME unix_install_recovery
+                COMMAND ${ARN_BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_unix_recovery_test.sh
+                        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install.sh)
+            set_tests_properties(unix_install_recovery PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+        endif()
     endif()
+    # SHA256SUMS generation for the release (scripts/release-checksums.cmake).
+    add_test(NAME release_checksums
+        COMMAND ${CMAKE_COMMAND}
+                "-DSCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/scripts/release-checksums.cmake"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/test-release-checksums"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_checksums_test.cmake")
+    set_tests_properties(release_checksums PROPERTIES TIMEOUT 60)
     add_executable(architecture_test tests/architecture_test.cpp)
     if (TARGET arn_core)
         get_target_property(ARN_CORE_SOURCE_DIR_PROP arn_core SOURCE_DIR)
@@ -286,19 +392,48 @@ if (BUILD_TESTING)
     #   integration  starts other programs (ARN, Node, Python, PowerShell, itself)
     #   console      needs a Windows console
     #   pty          needs a pseudo-terminal (tmux)
+    # Build identity and release preflight (CMake scripts; Git when available).
+    add_test(NAME build_identity
+        COMMAND ${CMAKE_COMMAND}
+                "-DSCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/cmake/ArnBuildInfo.cmake"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/test-build-identity"
+                "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/build_info_test.cmake")
+    add_test(NAME version_output
+        COMMAND ${CMAKE_COMMAND}
+                "-DARN_EXE=$<TARGET_FILE:arn>"
+                "-DEXPECTED_VERSION=${PROJECT_VERSION}"
+                "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+                "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/version_output_test.cmake")
+    add_test(NAME release_preflight
+        COMMAND ${CMAKE_COMMAND}
+                "-DSCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/scripts/release-preflight.cmake"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/test-release-preflight"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_preflight_test.cmake")
+    set_tests_properties(build_identity version_output release_preflight PROPERTIES TIMEOUT 60)
+
     set(_arn_unit_tests model_list model_provider confirmations_and_tools sandbox_symlinks
         architecture_boundary agent_workflow cli_support confirmation_input terminal_ui
         tui_renderer normal_chat)
     set_tests_properties(${_arn_unit_tests} PROPERTIES LABELS unit TIMEOUT 60)
-    set(_arn_integration_tests acp_client acp_session acp_subprocess)
+    set(_arn_integration_tests acp_client acp_session acp_subprocess
+        build_identity version_output release_preflight release_checksums)
     if (Python3_FOUND)
         list(APPEND _arn_integration_tests server_protocol)
     endif()
     if (WIN32)
-        list(APPEND _arn_integration_tests windows_install)
+        list(APPEND _arn_integration_tests windows_install windows_package_verification
+            windows_install_checksums windows_install_upgrade windows_install_recovery)
         set_tests_properties(terminal_windows_input terminal_windows_alternate PROPERTIES
             LABELS "console;integration")
     else()
+        foreach(_arn_unix_test IN ITEMS unix_package_verification unix_install_checksums unix_install_upgrade
+                unix_install_recovery)
+            if (TEST ${_arn_unix_test})
+                list(APPEND _arn_integration_tests ${_arn_unix_test})
+            endif()
+        endforeach()
         set_tests_properties(terminal_posix PROPERTIES LABELS unit)
         if (ARN_ENABLE_PTY_TESTS)
             set_tests_properties(terminal_posix_pty PROPERTIES LABELS "pty;integration")

@@ -2,6 +2,7 @@
 #include "acp/kiro_adapter.hpp"
 #include "agent/coding_prompt.hpp"
 #include "agent_workflow.hpp"
+#include "build_info.hpp"
 #include "cli_support.hpp"
 #include "model_provider.hpp"
 #include "normal_chat.hpp"
@@ -559,15 +560,11 @@ int run() {
 
 } // namespace
 
-#ifndef ARN_VERSION
-#define ARN_VERSION "dev"
-#endif
-
 int main(int argc, char** argv) {
     if (argc > 1) {
         const auto arg = std::string_view(argv[1]);
         if (arg == "--version" || arg == "-v") {
-            std::cout << "arn " << ARN_VERSION << '\n';
+            std::cout << arn::version_line() << '\n';
             return 0;
         }
         if (arg == "--server") {
