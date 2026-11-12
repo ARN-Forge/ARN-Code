@@ -23,7 +23,10 @@ case "$(uname -s):$(uname -m)" in
 esac
 archive_name="$package.tar.gz"
 
-root="$(mktemp -d "${TMPDIR:-/tmp}/arn-recovery-test.XXXXXX")"
+# macOS sets TMPDIR with a trailing slash; install.sh reports and records the
+# install directory without "//", so the test root is named without it too.
+tmp_base="${TMPDIR:-/tmp}"
+root="$(mktemp -d "${tmp_base%/}/arn-recovery-test.XXXXXX")"
 trap 'chmod -R u+w "$root" 2>/dev/null; rm -rf "$root"' EXIT
 mkdir -p "$root/tmp" "$root/home" "$root/pkg"
 export TMPDIR="$root/tmp" HOME="$root/home" SHELL=/bin/sh

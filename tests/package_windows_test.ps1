@@ -82,11 +82,13 @@ function New-Zip([string]$Path, [object[]]$Entries) {
 
 # The output of a child PowerShell as one line of text. PowerShell 7 shows an
 # error in its "concise view": the message is wrapped to the window width,
-# with a "|" gutter at the start of each continuation line. The gutter and
-# the line breaks are taken out, so a message reads the same as in Windows
-# PowerShell 5.1, whatever the width.
+# with a "|" gutter at the start of each continuation line, and it may be
+# coloured with ANSI escape sequences (as on GitHub's runners). The colours,
+# the gutter and the line breaks are taken out, so a message reads the same as
+# in Windows PowerShell 5.1, whatever the width and the terminal.
 function ConvertTo-PlainText([object[]]$Lines) {
-    return ((@($Lines | ForEach-Object { "$_" }) -join " ") -replace '\s+\|\s+', ' ') -replace '\s+', ' '
+    $text = (@($Lines | ForEach-Object { "$_" }) -join " ") -replace '\x1b\[[0-9;?]*[ -/]*[@-~]', ''
+    return ($text -replace '\s+\|\s+', ' ') -replace '\s+', ' '
 }
 
 # Runs verify-windows-package.ps1 in a child PowerShell so its failure cannot
@@ -139,6 +141,15 @@ try {
     # Every file of the valid package, as (name, path) pairs for the variants.
     $standard = @(Get-ChildItem -LiteralPath $packageDir -File | Sort-Object Name | ForEach-Object { , @($_.Name, $_.FullName) })
     $packagedNames = @($standard | ForEach-Object { $_[0].ToLowerInvariant() })
+    # The OpenSSL DLLs as this build names them (libcrypto-3-x64.dll with
+    # OpenSSL 3, libcrypto-4-x64.dll with OpenSSL 4, ...).
+    $cryptoDll = @($standard | ForEach-Object { $_[0] } | Where-Object { $_ -match '^libcrypto-[0-9]+(-x64)?\.dll$' })
+    $sslDll = @($standard | ForEach-Object { $_[0] } | Where-Object { $_ -match '^libssl-[0-9]+(-x64)?\.dll$' })
+    if ($cryptoDll.Count -ne 1 -or $sslDll.Count -ne 1) {
+        throw "Expected exactly one libcrypto and one libssl DLL in the package, found: $($packagedNames -join ', ')."
+    }
+    $cryptoDll = $cryptoDll[0]
+    $sslDll = $sslDll[0]
 
     # The package ships exactly the Visual C++ runtime that arn.exe needs.
     $script:cases++
@@ -161,10 +172,10 @@ try {
     Test-Verify "valid package without expectations" $packageZip $true @(
         "Extracted arn.exe: arn $version",
         # Transitive dependency: libcrypto through libssl.
-        "libcrypto-4-x64.dll (imported by libssl-4-x64.dll)",
+        "$cryptoDll (imported by $sslDll)",
         # Loaded by Windows from the extracted directory, with only System32 on PATH.
         "loaded from the package: vcruntime140.dll",
-        "loaded from the package: libssl-4-x64.dll",
+        "loaded from the package: $sslDll",
         "vcruntime140.dll $((Get-Item -LiteralPath (Join-Path $runtimeDir 'vcruntime140.dll')).VersionInfo.FileVersion), signed by Microsoft")
     if ($commit -match '^[0-9a-f]{12}$') {
         Test-Verify "valid package with exact version and commit" $packageZip $true @() `
@@ -239,7 +250,7 @@ try {
     Test-Verify "unexpected file" $zip $false @("unexpected entry 'notes.txt'")
 
     $zip = Join-Path $root "extra-dll.zip"
-    New-Zip $zip ($standard + , @('unrelated.dll', (Join-Path $packageDir 'libssl-4-x64.dll')))
+    New-Zip $zip ($standard + , @('unrelated.dll', (Join-Path $packageDir $sslDll)))
     Test-Verify "unexpected DLL" $zip $false @("Packaged DLLs that arn.exe does not use: unrelated.dll")
 
     $zip = Join-Path $root "unused-runtime.zip"
@@ -267,9 +278,9 @@ try {
     Test-Verify "missing Visual C++ runtime DLL" $zip $false @("vcruntime140_1.dll (Visual C++ runtime, imported by arn.exe)")
 
     $zip = Join-Path $root "missing-openssl.zip"
-    New-Zip $zip @($standard | Where-Object { $_[0] -ne 'libcrypto-4-x64.dll' })
+    New-Zip $zip @($standard | Where-Object { $_[0] -ne $cryptoDll })
     Test-Verify "missing transitive dependency" $zip $false @(
-        "libcrypto-4-x64.dll (imported by libssl-4-x64.dll)", "not packaged and not part of Windows")
+        "$cryptoDll (imported by $sslDll)", "not packaged and not part of Windows")
 
     # Wrong architecture: the official x86 build of the same runtime file.
     $x86Runtime = Join-Path ($runtimeDir -replace '[\\/]x64[\\/]', '\x86\') "vcruntime140.dll"
