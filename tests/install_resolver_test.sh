@@ -12,7 +12,10 @@ set -u
 export LC_ALL=C
 
 installer="$1"
-root="$(mktemp -d "${TMPDIR:-/tmp}/arn-resolver-test.XXXXXX")"
+# macOS sets TMPDIR with a trailing slash; install.sh reports the install
+# directory without "//", so the test root is named without it too.
+tmp_base="${TMPDIR:-/tmp}"
+root="$(mktemp -d "${tmp_base%/}/arn-resolver-test.XXXXXX")"
 trap 'rm -rf "$root"' EXIT
 mkdir -p "$root/tmp" "$root/home" "$root/shim" "$root/payloads"
 export TMPDIR="$root/tmp" HOME="$root/home" ARN_SKIP_PATH_UPDATE=1
