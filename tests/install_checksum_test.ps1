@@ -36,11 +36,35 @@ function Invoke-WebRequest {
     if ($path -eq $Uri -or -not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "404 Not Found: $Uri" }
     Copy-Item -LiteralPath $source -Destination $OutFile
 }
+# An HTTP error as the web cmdlets report it: an exception with a Response
+# that has a StatusCode.
+if (-not ("ArnTestHttpError" -as [type])) {
+    Add-Type -TypeDefinition @'
+public class ArnTestHttpError : System.Exception {
+    public ArnTestHttpError(string message, object response) : base(message) { Response = response; }
+    public object Response;
+}
+'@
+}
+# The GitHub API describes the release in releases\<tag> (its files are the
+# assets; HTTP 404 without that directory), and releases/latest the one
+# $global:ArnTestLatestTag names. (install_resolver_test.ps1 covers release
+# resolution in depth.)
 function Invoke-RestMethod {
-    param([hashtable]$Headers, [string]$Uri)
+    param([hashtable]$Headers, [string]$Uri, [int]$TimeoutSec)
     $global:ArnTestRequests.Add($Uri)
-    if ($Uri -notmatch '/releases/latest$' -or $null -eq $global:ArnTestLatestTag) { throw "404 Not Found: $Uri" }
-    return [pscustomobject]@{ tag_name = $global:ArnTestLatestTag }
+    $tag = $null
+    if ($Uri -match '/releases/latest$') { $tag = $global:ArnTestLatestTag }
+    elseif ($Uri -match '/releases/tags/([^/]+)$') { $tag = $Matches[1] }
+    $dir = if ($tag) { Join-Path $global:ArnTestReleases $tag } else { $null }
+    if (-not $tag -or (-not (Test-Path -LiteralPath $dir -PathType Container) -and $tag -cne $global:ArnTestLatestTag)) {
+        throw [ArnTestHttpError]::new("404 Not Found: $Uri", [pscustomobject]@{ StatusCode = 404; Headers = @{} })
+    }
+    $assets = @()
+    if (Test-Path -LiteralPath $dir -PathType Container) {
+        $assets = @(Get-ChildItem -LiteralPath $dir -File | ForEach-Object { [pscustomobject]@{ name = $_.Name } })
+    }
+    return [pscustomobject]@{ tag_name = $tag; draft = $false; prerelease = $false; assets = $assets }
 }
 
 # Runs install.ps1 into a fresh directory; checks the outcome, the message,
@@ -72,6 +96,15 @@ function Test-Install([string]$Name, [bool]$ShouldPass, [string]$Fragment, [hash
 
 $oldTmp = $env:TMP
 $oldTemp = $env:TEMP
+# install.ps1 takes defaults from these; a value inherited from the caller's
+# environment must not change a case. They are put back at the end.
+$installerVariables = @("ARN_VERSION", "ARN_ALLOW_DOWNGRADE", "ARN_INSTALL_ARCHIVE", "ARN_INSTALL_CHECKSUMS",
+                        "ARN_UNINSTALL", "ARN_ADOPT_EXISTING", "ARN_INSTALL_TEST_FAULT")
+$savedVariables = @{}
+foreach ($name in $installerVariables) {
+    $savedVariables[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+    [Environment]::SetEnvironmentVariable($name, $null, "Process")
+}
 try {
     New-Item -ItemType Directory -Path $root, (Join-Path $root "tmp"), (Join-Path $root "releases") | Out-Null
     $archive = Join-Path $root $archiveName
@@ -118,10 +151,13 @@ try {
         if (-not $NoManifest) { [IO.File]::WriteAllText((Join-Path $dir "SHA256SUMS"), $Text) }
     }
     Publish "v1.2.3" "$good  $archiveName`n"
-    $expectedUrls = "https://github.com/ARN-Forge/ARN-Code/releases/download/v1.2.3/$archiveName " +
-                    "https://github.com/ARN-Forge/ARN-Code/releases/download/v1.2.3/SHA256SUMS"
+    # The release is looked up first; SHA256SUMS is downloaded before the archive.
+    $expectedUrls = "https://github.com/ARN-Forge/ARN-Code/releases/download/v1.2.3/SHA256SUMS " +
+                    "https://github.com/ARN-Forge/ARN-Code/releases/download/v1.2.3/$archiveName"
     Test-Install "explicit version X.Y.Z" $true "Downloading ARN Code v1.2.3" @{ Version = "1.2.3" }
-    if (($global:ArnTestRequests -join " ") -ne $expectedUrls) { $failures.Add("explicit version requested: $($global:ArnTestRequests -join ' ')") }
+    if (($global:ArnTestRequests -join " ") -ne "https://api.github.com/repos/ARN-Forge/ARN-Code/releases/tags/v1.2.3 $expectedUrls") {
+        $failures.Add("explicit version requested: $($global:ArnTestRequests -join ' ')")
+    }
     Test-Install "explicit version vX.Y.Z" $true "Downloading ARN Code v1.2.3" @{ Version = "v1.2.3" }
     $env:ARN_VERSION = "1.2.3"
     try { Test-Install "version from ARN_VERSION" $true "Downloading ARN Code v1.2.3" @{} } finally { Remove-Item Env:ARN_VERSION }
@@ -131,14 +167,14 @@ try {
         $failures.Add("latest requested: $($global:ArnTestRequests -join ' ')")
     }
     $global:ArnTestLatestTag = "../../evil"
-    Test-Install "latest with an unexpected tag" $false "unexpected tag" @{}
+    Test-Install "latest with an unexpected tag" $false "malformed release metadata" @{}
     $global:ArnTestLatestTag = $null
-    Test-Install "latest unavailable" $false "404" @{}
+    Test-Install "latest unavailable" $false "has no published stable ARN Code release" @{}
     Publish "v2.0.0" -NoManifest
-    Test-Install "release without SHA256SUMS" $false "Could not download SHA256SUMS for v2.0.0" @{ Version = "2.0.0" }
+    Test-Install "release without SHA256SUMS" $false "ARN Code v2.0.0 has no SHA256SUMS" @{ Version = "2.0.0" }
     Publish "v2.1.0" ""
     Test-Install "release with an empty SHA256SUMS" $false "SHA256SUMS is missing or empty" @{ Version = "2.1.0" }
-    Test-Install "release without the archive" $false "Could not download $archiveName for v9.9.9" @{ Version = "9.9.9" }
+    Test-Install "release that does not exist" $false "There is no ARN Code release v9.9.9" @{ Version = "9.9.9" }
     Publish "v3.0.0" "$other  $archiveName`n"
     Test-Install "downloaded archive with a wrong checksum" $false "but SHA256SUMS lists $other" @{ Version = "3.0.0" }
 
@@ -158,6 +194,7 @@ try {
     else { Write-Host "ok: no temporary files left behind" }
 } finally {
     Remove-Variable -Scope Global -Name ArnTestRequests, ArnTestLatestTag, ArnTestReleases -ErrorAction SilentlyContinue
+    foreach ($name in $installerVariables) { [Environment]::SetEnvironmentVariable($name, $savedVariables[$name], "Process") }
     $env:TMP = $oldTmp
     $env:TEMP = $oldTemp
     if ($root.StartsWith($tempBase + '\', [StringComparison]::OrdinalIgnoreCase)) {

@@ -35,6 +35,17 @@ if ($Version -cne "latest") {
 if (-not $Uninstall -and $ArchivePath -and -not $ChecksumsPath) {
     throw "-ArchivePath needs -ChecksumsPath, the SHA256SUMS file to verify it with."
 }
+# An older version replaces an installed newer one only with
+# ARN_ALLOW_DOWNGRADE=1 (there is deliberately no parameter for it).
+$allowDowngrade = $false
+if (-not $Uninstall) {
+    switch -CaseSensitive ([string]$env:ARN_ALLOW_DOWNGRADE) {
+        "" { }
+        "0" { }
+        "1" { $allowDowngrade = $true }
+        default { throw "ARN_ALLOW_DOWNGRADE must be 1 (or unset), got '$env:ARN_ALLOW_DOWNGRADE'." }
+    }
+}
 
 # Relative paths are taken from the PowerShell location; ".", ".." and
 # repeated separators are resolved, so one directory has one spelling.
@@ -689,6 +700,175 @@ function Stop-WithManualCleanup([string]$Reason) {
            "$InstallDir from your user PATH if the installer added it.")
 }
 
+# Exactly X.Y.Z, decimal numbers without leading zeros.
+function Test-Semver($Value) {
+    return ($Value -is [string]) -and ($Value -cmatch "^$semver\z")
+}
+
+# -1, 0 or 1 for two validated X.Y.Z versions. Each part is compared as a
+# number of any size (the shorter digit string is smaller, equal lengths
+# compare digit by digit), never as a whole string, so 0.10.0 is newer than 0.9.0.
+function Compare-ArnVersion([string]$A, [string]$B) {
+    $x = $A.Split('.')
+    $y = $B.Split('.')
+    for ($k = 0; $k -lt 3; $k++) {
+        if ($x[$k].Length -ne $y[$k].Length) { if ($x[$k].Length -lt $y[$k].Length) { return -1 } else { return 1 } }
+        $order = [string]::CompareOrdinal($x[$k], $y[$k])
+        if ($order -lt 0) { return -1 }
+        if ($order -gt 0) { return 1 }
+    }
+    return 0
+}
+
+# The installed version, for the downgrade check: the version the manifest
+# records, or else what the installed arn.exe reports. arn.exe is run only
+# when it is ARN's: the manifest lists it, or -AdoptExisting claims it (any
+# other arn.exe makes the update stop later anyway). $null when no valid
+# X.Y.Z is found (the version is then unknown, never guessed).
+function Get-InstalledArnVersion {
+    $owned = [bool]$AdoptExisting
+    try {
+        $recorded = Read-InstallManifest
+        if ($recorded -and (Test-Semver $recorded.Version)) { return $recorded.Version }
+        if ($recorded -and @($recorded.Files | Where-Object { [string]::Equals($_, "arn.exe", [StringComparison]::OrdinalIgnoreCase) }).Count) { $owned = $true }
+    } catch { }
+    if (-not $owned) { return $null }
+    $executable = Join-Path $InstallDir "arn.exe"
+    if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { return $null }
+    if (Test-ReparsePoint (Get-Item -LiteralPath $executable -Force)) { return $null }
+    try {
+        $reported = @(Invoke-WithoutErrorDialogs { & $executable --version 2>$null }) -join "`n"
+        if ($LASTEXITCODE -eq 0 -and $reported -cmatch "^arn ($semver)(?: [^\r\n]*)?\z") { return $Matches[1] }
+    } catch { }
+    return $null
+}
+
+# The ready-to-copy command that runs this installer from the repository's
+# main branch with the given environment variables.
+function Get-InstallCommand([System.Collections.Specialized.OrderedDictionary]$Variables) {
+    $url = "https://raw.githubusercontent.com/$Repository/main/scripts/install.ps1"
+    $settings = @($Variables.Keys | ForEach-Object { "`$env:$_ = `"$($Variables[$_])`"" }) -join "; "
+    if ($Repository -ceq "ARN-Forge/ARN-Code") { return "$settings; irm $url | iex" }
+    return "$settings; & ([scriptblock]::Create((irm $url))) -Repository $Repository"
+}
+
+# Refuses to replace a newer installed version unless ARN_ALLOW_DOWNGRADE=1.
+$script:downgradeWarned = $false
+function Assert-NotDowngrade([string]$Installed, [string]$New, [string]$Retry) {
+    if (-not $Installed -or (Compare-ArnVersion $New $Installed) -ge 0) { return }
+    if ($allowDowngrade) {
+        if (-not $script:downgradeWarned) {
+            Write-Warning "Replacing ARN Code $Installed with the older $New, because ARN_ALLOW_DOWNGRADE=1."
+            $script:downgradeWarned = $true
+        }
+        return
+    }
+    throw ("Downgrade refused: ARN Code $Installed is installed in $InstallDir, and $New is older.`n" +
+           "Nothing was changed. To install $New anyway, run the installer again with ARN_ALLOW_DOWNGRADE=1$Retry")
+}
+
+# A header of an error response, from Windows PowerShell (WebHeaderCollection)
+# or PowerShell 7 (HttpResponseHeaders); $null when absent.
+function Get-ResponseHeader($Response, [string]$Name) {
+    try {
+        $all = $Response.Headers
+        if ($all -is [Collections.IDictionary]) {
+            foreach ($key in @($all.Keys)) { if ([string]$key -ieq $Name) { return [string](@($all[$key])[0]) } }
+            return $null
+        }
+        if ($all -is [Net.WebHeaderCollection]) { return $all[$Name] }
+        $values = $null
+        if ($all.TryGetValues($Name, [ref]$values)) { return [string](@($values)[0]) }
+    } catch { }
+    return $null
+}
+
+# GET https://api.github.com/repos/<Repository>/<Path>. Returns Ok, Status
+# (the HTTP status, 0 without an answer), Data and Problem. Never retries.
+function Invoke-GitHubApi([string]$Path) {
+    $apiHeaders = @{ "User-Agent" = "ARN-Code-Installer"; "Accept" = "application/vnd.github+json"; "X-GitHub-Api-Version" = "2022-11-28" }
+    try {
+        $data = Invoke-RestMethod -Headers $apiHeaders -Uri "https://api.github.com/repos/$Repository/$Path" -TimeoutSec 60
+        return [pscustomobject]@{ Ok = $true; Status = 200; Data = $data; Problem = $null }
+    } catch {
+        $status = 0
+        $response = $_.Exception.Response
+        if ($response) { try { $status = [int]$response.StatusCode } catch { $status = 0 } }
+        $body = if ($_.ErrorDetails) { [string]$_.ErrorDetails.Message } else { "" }
+        if ($status -eq 429 -or ($status -eq 403 -and ((Get-ResponseHeader $response "X-RateLimit-Remaining") -ceq "0" -or $body -match 'rate limit'))) {
+            $problem = "the GitHub API rate limit was reached (GitHub allows 60 requests an hour from one address without signing in); try again later"
+        } elseif ($status) {
+            $problem = "the GitHub API answered HTTP $status"
+        } else {
+            $problem = "GitHub could not be reached ($($_.Exception.Message))"
+        }
+        return [pscustomobject]@{ Ok = $false; Status = $status; Data = $null; Problem = $problem }
+    }
+}
+
+# Checks one release object from the GitHub API: a string tag_name vX.Y.Z,
+# boolean draft and prerelease, and an assets array of objects with string
+# names. Returns its tag, flags and how often the archive and SHA256SUMS are
+# listed, or $null when the metadata is malformed.
+function Get-ReleaseInfo($Release) {
+    if (-not ($Release -is [Management.Automation.PSCustomObject])) { return $null }
+    $tagName = $Release.tag_name
+    if (-not ($tagName -is [string]) -or $tagName -cnotmatch "^v$semver\z") { return $null }
+    if (-not ($Release.draft -is [bool]) -or -not ($Release.prerelease -is [bool])) { return $null }
+    $assets = $Release.assets
+    if (-not ($assets -is [array])) { return $null }
+    $archiveCount = 0
+    $sumsCount = 0
+    foreach ($asset in $assets) {
+        if (-not ($asset -is [Management.Automation.PSCustomObject]) -or -not ($asset.name -is [string])) { return $null }
+        if ($asset.name -ceq $archiveName) { $archiveCount++ }
+        elseif ($asset.name -ceq "SHA256SUMS") { $sumsCount++ }
+    }
+    return [pscustomobject]@{ Tag = $tagName; Version = $tagName.Substring(1); Draft = $Release.draft
+                              Prerelease = $Release.prerelease; ArchiveCount = $archiveCount; SumsCount = $sumsCount }
+}
+
+# The latest stable release cannot be installed here. Nothing older is
+# installed in its place: the message names the newest release that could
+# be, as a command to run.
+function Stop-WithoutRelease([string]$Reason, [string]$LatestTag) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add($Reason)
+    $answer = Invoke-GitHubApi "releases?per_page=100"
+    # PowerShell 7 hands a JSON array out item by item (none for "[]").
+    $releases = if ($answer.Ok) { @($answer.Data | Where-Object { $null -ne $_ }) } else { $null }
+    if (-not $answer.Ok) {
+        $lines.Add("Could not look for another release that has ${archiveName}: $($answer.Problem).")
+    } elseif (@($releases | Where-Object { -not ($_ -is [Management.Automation.PSCustomObject]) }).Count) {
+        $lines.Add("Could not look for another release that has ${archiveName}: GitHub returned malformed release metadata.")
+    } else {
+        $stable = $null
+        $prerelease = $null
+        foreach ($release in $releases) {
+            $info = Get-ReleaseInfo $release
+            if (-not $info -or $info.Draft -or $info.Tag -ceq $LatestTag -or $info.ArchiveCount -ne 1 -or $info.SumsCount -ne 1) { continue }
+            if (-not $info.Prerelease) {
+                if (-not $stable -or (Compare-ArnVersion $info.Version $stable) -gt 0) { $stable = $info.Version }
+            } elseif (-not $prerelease -or (Compare-ArnVersion $info.Version $prerelease) -gt 0) {
+                $prerelease = $info.Version
+            }
+        }
+        if ($stable) {
+            $lines.Add("The newest stable release that has $archiveName and SHA256SUMS is v$stable.")
+            $lines.Add("It is not installed automatically. To install it, run:")
+            $lines.Add("  " + (Get-InstallCommand ([ordered]@{ ARN_VERSION = $stable })))
+        } else {
+            $lines.Add("No compatible release: no stable ARN Code release has both $archiveName and SHA256SUMS.")
+        }
+        if ($prerelease -and (-not $stable -or (Compare-ArnVersion $prerelease $stable) -gt 0)) {
+            $lines.Add("The prerelease v$prerelease has them; prereleases are installed only when named:")
+            $lines.Add("  " + (Get-InstallCommand ([ordered]@{ ARN_VERSION = $prerelease })))
+        }
+    }
+    $lines.Add("ARN Code was not installed.")
+    throw ($lines -join "`n")
+}
+
 Resolve-PendingTransaction $(if ($Uninstall) { "Uninstall" } else { "Update" })
 
 if ($Uninstall) {
@@ -749,28 +929,53 @@ if ($Uninstall) {
     return
 }
 
+$currentVersion = Get-InstalledArnVersion
 try {
     New-Item -ItemType Directory -Path $temporaryDir, $extractDir -Force | Out-Null
+    # Release resolution. The release is looked up first; nothing is
+    # downloaded unless it is the requested (or latest stable) release, is
+    # published, and lists both the archive for this platform and SHA256SUMS.
+    # SHA256SUMS comes first and must have an entry for the archive; the
+    # archive is downloaded only then, and it is checked before it is
+    # extracted or run.
     if ($ArchivePath) {
         $resolvedArchive = (Resolve-Path -LiteralPath $ArchivePath).Path
         $resolvedManifest = (Resolve-Path -LiteralPath $ChecksumsPath).Path
-        Copy-Item -LiteralPath $resolvedArchive -Destination $temporaryZip
         Copy-Item -LiteralPath $resolvedManifest -Destination $temporaryManifest
         Write-Host "Installing ARN Code from local package..."
     } else {
-        if (-not $tag) {
-            $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$Repository/releases/latest"
-            $tag = [string]$release.tag_name
-            if ($tag -cnotmatch "^v$semver\z") { throw "The latest ARN Code release has an unexpected tag ('$tag')." }
+        $what = if ($tag) { "ARN Code $tag" } else { "the latest ARN Code release" }
+        $answer = Invoke-GitHubApi $(if ($tag) { "releases/tags/$tag" } else { "releases/latest" })
+        if (-not $answer.Ok) {
+            if ($answer.Status -eq 404 -and $tag) { throw "There is no ARN Code release $tag (no published release has that tag in $Repository). ARN Code was not installed." }
+            if ($answer.Status -eq 404) { throw "$Repository has no published stable ARN Code release. ARN Code was not installed." }
+            throw "Could not look up ${what}: $($answer.Problem). ARN Code was not installed."
         }
+        $info = Get-ReleaseInfo $answer.Data
+        if (-not $info -or ($tag -and $info.Tag -cne $tag)) {
+            throw "GitHub returned malformed release metadata for $what; ARN Code was not installed."
+        }
+        if (-not $tag -and ($info.Draft -or $info.Prerelease)) {
+            throw "GitHub named $($info.Tag), a draft or prerelease, as the latest release; it is not installed without ARN_VERSION."
+        }
+        if ($info.Draft) { throw "ARN Code $tag is an unpublished draft release; it is not installed." }
+        if ($info.ArchiveCount -gt 1 -or $info.SumsCount -gt 1) {
+            throw "GitHub returned malformed release metadata for $what (an asset is listed twice); ARN Code was not installed."
+        }
+        if (-not $tag) {
+            $tag = $info.Tag
+            if ($info.ArchiveCount -eq 0) { Stop-WithoutRelease "The latest ARN Code release, $tag, has no $archiveName (no build for Windows x64)." $tag }
+            if ($info.SumsCount -eq 0) { Stop-WithoutRelease "The latest ARN Code release, $tag, has no SHA256SUMS, so its $archiveName cannot be verified." $tag }
+        } else {
+            if ($info.ArchiveCount -eq 0) { throw "ARN Code $tag has no $archiveName (no build for Windows x64); ARN Code was not installed." }
+            if ($info.SumsCount -eq 0) { throw "ARN Code $tag has no SHA256SUMS, so its $archiveName cannot be verified; ARN Code was not installed." }
+            if ($info.Prerelease) { Write-Host "Note: $tag is a prerelease; it is installed because ARN_VERSION names it." }
+        }
+        Assert-NotDowngrade $currentVersion $info.Version (", for example:`n  " +
+            (Get-InstallCommand ([ordered]@{ ARN_ALLOW_DOWNGRADE = "1"; ARN_VERSION = $info.Version })))
         # Both files come from the same tag.
         $download = "https://github.com/$Repository/releases/download/$tag"
         Write-Host "Downloading ARN Code $tag..."
-        try {
-            Invoke-WebRequest -Headers $headers -Uri "$download/$archiveName" -OutFile $temporaryZip
-        } catch {
-            throw "Could not download $archiveName for ${tag}: $($_.Exception.Message)"
-        }
         try {
             Invoke-WebRequest -Headers $headers -Uri "$download/SHA256SUMS" -OutFile $temporaryManifest
         } catch {
@@ -796,6 +1001,15 @@ try {
     }
     if ($entries.Count -eq 0) { throw "Checksum verification failed: SHA256SUMS has no entry for $archiveName. ARN Code was not installed." }
     if ($entries.Count -gt 1) { throw "Checksum verification failed: SHA256SUMS lists $archiveName more than once. ARN Code was not installed." }
+    if ($ArchivePath) {
+        Copy-Item -LiteralPath $resolvedArchive -Destination $temporaryZip
+    } else {
+        try {
+            Invoke-WebRequest -Headers $headers -Uri "$download/$archiveName" -OutFile $temporaryZip
+        } catch {
+            throw "Could not download $archiveName for ${tag}: $($_.Exception.Message)"
+        }
+    }
     $actualHash = (Get-FileHash -LiteralPath $temporaryZip -Algorithm SHA256).Hash
     if (-not [string]::Equals($actualHash, $entries[0], [StringComparison]::OrdinalIgnoreCase)) {
         throw "Checksum verification failed: $archiveName has SHA-256 $($actualHash.ToLowerInvariant()), but SHA256SUMS lists $($entries[0].ToLowerInvariant()). ARN Code was not installed."
@@ -819,6 +1033,13 @@ try {
     if ($LASTEXITCODE -ne 0 -or $version -notmatch '^arn [0-9]+\.[0-9]+\.[0-9]+') {
         throw "The downloaded ARN executable failed its version check."
     }
+    $versionText = @($version) -join "`n"
+    if ($versionText -cnotmatch "^arn ($semver)(?: [^\r\n]*)?\z") {
+        throw "The downloaded ARN executable reports an invalid version ('$versionText')."
+    }
+    # The version the package itself reports decides (for a local package it
+    # is the only one known).
+    Assert-NotDowngrade $currentVersion $Matches[1] "."
     $payload = @(Get-ChildItem -LiteralPath $payloadRoot -File)
     foreach ($file in $payload) {
         if (-not (Test-OwnedName $file.Name)) { throw "The package contains an unexpected file name '$($file.Name)'." }

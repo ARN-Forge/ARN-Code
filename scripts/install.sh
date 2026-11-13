@@ -14,6 +14,7 @@ system="$(uname -s)"
 machine="$(uname -m)"
 uninstall="${ARN_UNINSTALL:-0}"
 adopt_existing="${ARN_ADOPT_EXISTING:-0}"
+allow_downgrade="${ARN_ALLOW_DOWNGRADE:-0}"
 newline='
 '
 carriage_return="$(printf '\r')"
@@ -591,6 +592,14 @@ case "${requested_version}" in
         ;;
 esac
 
+case "${allow_downgrade}" in
+    0|"") allow_downgrade=0 ;;
+    1) ;;
+    *)
+        echo "ARN_ALLOW_DOWNGRADE must be 1 (or unset), got '${allow_downgrade}'." >&2
+        exit 1
+        ;;
+esac
 if [ -n "${archive_override}" ] && [ -z "${checksums_override}" ]; then
     echo "ARN_INSTALL_ARCHIVE needs ARN_INSTALL_CHECKSUMS, the SHA256SUMS file to verify it with." >&2
     exit 1
@@ -600,43 +609,299 @@ if ! command -v curl >/dev/null 2>&1 && [ -z "${archive_override}" ]; then
     exit 1
 fi
 
+# is_semver <value>: exactly X.Y.Z, decimal numbers without leading zeros.
+is_semver() {
+    single_line "$1" && printf '%s\n' "$1" | grep -Eq "^${semver}\$"
+}
+
+# vcmp(a, b) for awk: -1, 0 or 1 for two validated X.Y.Z versions. Each part
+# is compared as a number of any size (the shorter digit string is smaller,
+# equal lengths compare digit by digit), never as a whole string, so 0.10.0
+# is newer than 0.9.0.
+awk_vcmp='
+function vcmp(a, b,   x, y, k) {
+    split(a, x, "."); split(b, y, ".")
+    for (k = 1; k <= 3; k++) {
+        if (length(x[k]) != length(y[k])) return length(x[k]) < length(y[k]) ? -1 : 1
+        if ((x[k] "") != (y[k] "")) return (x[k] "") < (y[k] "") ? -1 : 1
+    }
+    return 0
+}'
+
+# version_compare <a> <b>: prints -1, 0 or 1 (a older, the same, newer).
+version_compare() {
+    awk -v a="$1" -v b="$2" "${awk_vcmp}"'
+BEGIN { print vcmp(a, b) }'
+}
+
+# The installed version, for the downgrade check: the version the manifest
+# records, or else what the installed arn reports. The arn is run only when
+# it is ARN's: the manifest lists it, or ARN_ADOPT_EXISTING=1 claims it (any
+# other arn makes the update stop later anyway). Empty when no valid X.Y.Z is
+# found (the version is then unknown, never guessed).
+installed_version=""
+detect_installed_version() {
+    installed_version=""
+    arn_owned="${adopt_existing}"
+    if [ -f "${manifest_path}" ] && [ ! -L "${manifest_path}" ]; then
+        recorded="$(sed -n 's/^version //p' "${manifest_path}" 2>/dev/null || true)"
+        if is_semver "${recorded}"; then
+            installed_version="${recorded}"
+            return 0
+        fi
+        if grep -qx 'file arn' "${manifest_path}" 2>/dev/null; then arn_owned=1; fi
+    fi
+    if [ "${arn_owned}" = 1 ] && [ -f "${install_dir}/arn" ] && [ -x "${install_dir}/arn" ] && [ ! -L "${install_dir}/arn" ]; then
+        reported="$("${install_dir}/arn" --version </dev/null 2>/dev/null | sed -n '1s/^arn \([^ ]*\)\( .*\)\{0,1\}$/\1/p' || true)"
+        if is_semver "${reported}"; then installed_version="${reported}"; fi
+    fi
+    return 0
+}
+
+# check_downgrade <new X.Y.Z> <how to retry>: refuses to replace a newer
+# installed version unless ARN_ALLOW_DOWNGRADE=1.
+downgrade_warned=0
+check_downgrade() {
+    [ -n "${installed_version}" ] || return 0
+    [ "$(version_compare "$1" "${installed_version}")" = -1 ] || return 0
+    if [ "${allow_downgrade}" = 1 ]; then
+        if [ "${downgrade_warned}" = 0 ]; then
+            echo "Warning: replacing ARN Code ${installed_version} with the older $1, because ARN_ALLOW_DOWNGRADE=1." >&2
+            downgrade_warned=1
+        fi
+        return 0
+    fi
+    echo "Downgrade refused: ARN Code ${installed_version} is installed in ${install_dir}, and $1 is older." >&2
+    echo "Nothing was changed. To install $1 anyway, run the installer again with ARN_ALLOW_DOWNGRADE=1$2" >&2
+    exit 1
+}
+
+# The ready-to-copy command that installs version $1 with this installer.
+install_command() {
+    command_vars="ARN_VERSION=$1"
+    if [ "${repository}" != "ARN-Forge/ARN-Code" ]; then command_vars="ARN_REPOSITORY=${repository} ${command_vars}"; fi
+    printf 'curl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | %s sh\n' "${repository}" "${command_vars}"
+}
+
+# json_flatten: reads one JSON document and prints one line per value,
+# "<path><TAB><kind>:<text>": kind "o" or "a" opens an object or array
+# (empty text), "s" is a string (its JSON escapes left as written), "l" a
+# number, true, false or null. Paths are like .assets[0].name or [2].tag_name.
+# Exits 2 on anything that is not well-formed JSON: the release metadata is
+# only parsed, never evaluated. A string longer than 256 characters is checked
+# in full but printed as "(long string)": no value the installer reads is
+# that long, and keeping only short ones keeps the work linear.
+json_flatten_awk='
+function after_value() { if (depth == 0) done = 1; else state = "," }
+function vpath() {
+    if (depth == 0) return ""
+    if (ctype[depth] == "o") return cpath[depth] "." ckey[depth]
+    return cpath[depth] "[" cidx[depth] "]"
+}
+function read_string(   j, c, h, str, len) {
+    j = i + 1
+    str = ""
+    len = 0
+    while (j <= n) {
+        c = ch[j]
+        if (c == "\"") { i = j + 1; return (len > 256 ? "(long string)" : str) }
+        if (c == "\\") {
+            c = ch[j + 1]
+            if (c == "u") {
+                h = ch[j + 2] ch[j + 3] ch[j + 4] ch[j + 5]
+                if (h !~ /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/) exit 2
+                c = "\\u" h
+                j += 6
+            } else {
+                if (c == "" || index("\"\\/bfnrt", c) == 0) exit 2
+                c = "\\" c
+                j += 2
+            }
+        } else {
+            if (c < " ") exit 2
+            j++
+        }
+        len++
+        if (len <= 256) str = str c
+    }
+    exit 2
+}
+{ s = s $0 "\n" }
+END {
+    # One character per element, split once: indexing is constant time in
+    # every awk, while substr() measures the whole string on each call in
+    # some (BWK awk, the base of the macOS awk, and BusyBox), which made
+    # parsing a release list quadratic there.
+    n = split(s, ch, "")
+    s = ""
+    i = 1; depth = 0; state = "v"; done = 0
+    while (i <= n) {
+        c = ch[i]
+        if (c == " " || c == "\t" || c == "\n" || c == "\r") { i++; continue }
+        if (done) exit 2
+        if (state == "v" || state == "v]") {
+            if (state == "v]" && c == "]") { depth--; i++; after_value(); continue }
+            p = vpath()
+            if (c == "{") { depth++; ctype[depth] = "o"; cpath[depth] = p; print p "\to:"; state = "k}"; i++; continue }
+            if (c == "[") { depth++; ctype[depth] = "a"; cpath[depth] = p; cidx[depth] = 0; print p "\ta:"; state = "v]"; i++; continue }
+            if (c == "\"") { v = read_string(); print p "\ts:" v; after_value(); continue }
+            v = ""
+            while (i <= n && index("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+-.", ch[i]) > 0) {
+                if (length(v) >= 64) exit 2
+                v = v ch[i]
+                i++
+            }
+            if (v !~ /^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)$/) exit 2
+            print p "\tl:" v
+            after_value()
+            continue
+        }
+        if (state == "k}" || state == "k") {
+            if (state == "k}" && c == "}") { depth--; i++; after_value(); continue }
+            if (c != "\"") exit 2
+            ckey[depth] = read_string()
+            state = ":"
+            continue
+        }
+        if (state == ":") { if (c != ":") exit 2; i++; state = "v"; continue }
+        if (c == ",") {
+            i++
+            if (ctype[depth] == "o") state = "k"; else { cidx[depth]++; state = "v" }
+            continue
+        }
+        if ((c == "}" && ctype[depth] == "o") || (c == "]" && ctype[depth] == "a")) { depth--; i++; after_value(); continue }
+        exit 2
+    }
+    if (!done) exit 2
+}'
+
+# release_summary (awk -v mode=one|list -v archive=<name>) reads json_flatten
+# output of one release (mode one) or a list of releases (mode list) and
+# prints one line per release: "<index> <tag> <draft> <prerelease> <archive
+# assets> <SHA256SUMS assets> <valid>" (tab-separated; tag "-" when invalid).
+# A release is valid with exactly one string tag_name of the form vX.Y.Z,
+# boolean draft and prerelease, and an assets array whose names are strings.
+# Exits 2 when the document is not an object (one) or array (list).
+release_summary_awk='
+BEGIN { FS = "\t" }
+{
+    path = $1
+    val = substr($0, length($1) + 2)
+    if (path == "") { root = val; next }
+    if (mode == "list") {
+        if (!match(path, /^\[[0-9]+\]/)) { bad = 1; next }
+        g = substr(path, 2, RLENGTH - 2)
+        rest = substr(path, RLENGTH + 1)
+        if (rest == "") { seen[g] = 1; if (val != "o:") invalid[g] = 1; next }
+    } else {
+        g = 0
+        rest = path
+    }
+    seen[g] = 1
+    if (rest == ".tag_name") { tagn[g]++; if (substr(val, 1, 2) == "s:") tag[g] = substr(val, 3); else invalid[g] = 1 }
+    else if (rest == ".draft") { draftn[g]++; draft[g] = val }
+    else if (rest == ".prerelease") { pren[g]++; pre[g] = val }
+    else if (rest == ".assets") { assetsn[g]++; if (val != "a:") invalid[g] = 1 }
+    else if (rest ~ /^\.assets\[[0-9]+\]\.name$/) {
+        if (substr(val, 1, 2) != "s:") invalid[g] = 1
+        else if (substr(val, 3) == archive) arch[g]++
+        else if (substr(val, 3) == "SHA256SUMS") sums[g]++
+    }
+}
+END {
+    if (bad || root != (mode == "list" ? "a:" : "o:")) exit 2
+    for (g in seen) {
+        ok = !invalid[g] && tagn[g] == 1 && draftn[g] == 1 && pren[g] == 1 && assetsn[g] == 1 &&
+             (draft[g] == "l:true" || draft[g] == "l:false") && (pre[g] == "l:true" || pre[g] == "l:false") &&
+             tag[g] ~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/
+        printf "%s\t%s\t%d\t%d\t%d\t%d\t%d\n", g, (ok ? tag[g] : "-"), (draft[g] == "l:true"), (pre[g] == "l:true"), arch[g], sums[g], ok
+    }
+}'
+
+# github_api <path> <output>: GET https://api.github.com/repos/<repository>/<path>.
+# Returns 0 for HTTP 200; otherwise sets api_status (the HTTP status, or 000
+# without an answer) and api_problem, and returns 1. Never retries.
+github_api() {
+    api_problem=""
+    : > "${temporary_dir}/api-headers"
+    if ! api_status="$(curl --silent --show-error --location --proto '=https' --connect-timeout 20 --max-time 60 \
+            --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --user-agent ARN-Code-Installer --dump-header "${temporary_dir}/api-headers" \
+            --output "$2" --write-out '%{http_code}' \
+            "https://api.github.com/repos/${repository}/$1" 2>"${temporary_dir}/api-error")"; then
+        api_status=000
+        api_problem="GitHub could not be reached ($(sed -n '1s/^curl: //p' "${temporary_dir}/api-error" | cut -c1-200))"
+        return 1
+    fi
+    case "${api_status}" in
+        200) return 0 ;;
+        [1-5][0-9][0-9]) ;;
+        *)
+            api_problem="GitHub sent no valid answer"
+            api_status=000
+            return 1
+            ;;
+    esac
+    if [ "${api_status}" = 429 ] || { [ "${api_status}" = 403 ] &&
+            { grep -Eiq '^x-ratelimit-remaining:[[:space:]]*0[[:space:]]*$' "${temporary_dir}/api-headers" ||
+              grep -iq 'rate limit' "$2" 2>/dev/null; }; }; then
+        api_problem="the GitHub API rate limit was reached (GitHub allows 60 requests an hour from one address without signing in); try again later"
+    else
+        api_problem="the GitHub API answered HTTP ${api_status}"
+    fi
+    return 1
+}
+
+# summarize <json file> <one|list> <summary file>: 1 for malformed metadata.
+summarize() {
+    awk "${json_flatten_awk}" < "$1" > "$1.flat" 2>/dev/null &&
+        awk -v mode="$2" -v archive="${archive_name}" "${release_summary_awk}" < "$1.flat" > "$3" 2>/dev/null
+}
+
+# stop_without_release <reason>: the latest stable release cannot be
+# installed here. Nothing older is installed in its place: this names the
+# newest release that could be, as a command to run.
+stop_without_release() {
+    echo "$1" >&2
+    if ! github_api "releases?per_page=100" "${temporary_dir}/releases.json"; then
+        echo "Could not look for another release that has ${archive_name}: ${api_problem}." >&2
+    elif ! summarize "${temporary_dir}/releases.json" list "${temporary_dir}/releases.sum"; then
+        echo "Could not look for another release that has ${archive_name}: GitHub returned malformed release metadata." >&2
+    else
+        # The newest valid, published release with the archive and exactly one
+        # SHA256SUMS: stable ones first; a prerelease is only mentioned.
+        best="$(awk -v exclude="${tag}" "${awk_vcmp}"'
+BEGIN { FS = "\t" }
+$7 == 1 && $3 == 0 && $5 == 1 && $6 == 1 && $2 != exclude {
+    v = substr($2, 2)
+    if ($4 == 0) { if (stable == "" || vcmp(v, stable) > 0) stable = v }
+    else if (pre == "" || vcmp(v, pre) > 0) pre = v
+}
+END { print (stable == "" ? "-" : stable) " " (pre == "" ? "-" : pre) }' "${temporary_dir}/releases.sum")"
+        best_stable="${best% *}"
+        best_pre="${best#* }"
+        if [ "${best_stable}" != "-" ]; then
+            echo "The newest stable release that has ${archive_name} and SHA256SUMS is v${best_stable}." >&2
+            echo "It is not installed automatically. To install it, run:" >&2
+            echo "  $(install_command "${best_stable}")" >&2
+        else
+            echo "No compatible release: no stable ARN Code release has both ${archive_name} and SHA256SUMS." >&2
+        fi
+        if [ "${best_pre}" != "-" ] && { [ "${best_stable}" = "-" ] || [ "$(version_compare "${best_pre}" "${best_stable}")" = 1 ]; }; then
+            echo "The prerelease v${best_pre} has them; prereleases are installed only when named:" >&2
+            echo "  $(install_command "${best_pre}")" >&2
+        fi
+    fi
+    echo "ARN Code was not installed." >&2
+    exit 1
+}
+
+detect_installed_version
+
 temporary_dir="$(mktemp -d)"
 trap 'cleanup_profile_files; rm -rf "${temporary_dir}"' EXIT
 archive="${temporary_dir}/${archive_name}"
 manifest="${temporary_dir}/SHA256SUMS"
-
-if [ -n "${archive_override}" ]; then
-    [ -f "${archive_override}" ] || { echo "ARN_INSTALL_ARCHIVE '${archive_override}' does not exist." >&2; exit 1; }
-    [ -f "${checksums_override}" ] || { echo "ARN_INSTALL_CHECKSUMS '${checksums_override}' does not exist." >&2; exit 1; }
-    cp "${archive_override}" "${archive}"
-    cp "${checksums_override}" "${manifest}"
-    echo "Installing ARN Code from local package..."
-else
-    releases="https://github.com/${repository}/releases"
-    if [ -z "${tag}" ]; then
-        # The latest release page redirects to releases/tag/vX.Y.Z; both files
-        # are then taken from that one tag.
-        if ! latest_url="$(curl --fail --location --head --show-error --silent \
-                --output /dev/null --write-out '%{url_effective}' "${releases}/latest")"; then
-            echo "Could not find the latest ARN Code release." >&2
-            exit 1
-        fi
-        tag="${latest_url##*/}"
-        if ! printf '%s\n' "${tag}" | grep -Eq "^v${semver}\$"; then
-            echo "The latest ARN Code release has an unexpected tag ('${tag}')." >&2
-            exit 1
-        fi
-    fi
-    echo "Downloading ARN Code ${tag} (${package})..."
-    if ! curl --fail --location --show-error --silent "${releases}/download/${tag}/${archive_name}" --output "${archive}"; then
-        echo "Could not download ${archive_name} for ${tag}." >&2
-        exit 1
-    fi
-    if ! curl --fail --location --show-error --silent "${releases}/download/${tag}/SHA256SUMS" --output "${manifest}"; then
-        echo "Could not download SHA256SUMS for ${tag}; the archive cannot be verified, so it is not installed." >&2
-        exit 1
-    fi
-fi
 
 # Verify the archive before anything is extracted or run. Every manifest line
 # must be "<64 hex digits><space><space or *><file name>"; the manifest is only
@@ -646,6 +911,91 @@ fail_verification() {
     echo "ARN Code was not installed." >&2
     exit 1
 }
+
+# Release resolution. The release is looked up first; nothing is downloaded
+# unless it is the requested (or latest stable) release, is published, and
+# lists both the archive for this platform and SHA256SUMS. SHA256SUMS comes
+# first and must have an entry for the archive; the archive is downloaded
+# only then, and it is checked before it is extracted or run.
+if [ -n "${archive_override}" ]; then
+    [ -f "${archive_override}" ] || { echo "ARN_INSTALL_ARCHIVE '${archive_override}' does not exist." >&2; exit 1; }
+    [ -f "${checksums_override}" ] || { echo "ARN_INSTALL_CHECKSUMS '${checksums_override}' does not exist." >&2; exit 1; }
+    cp "${checksums_override}" "${manifest}"
+    echo "Installing ARN Code from local package..."
+else
+    if [ -n "${tag}" ]; then
+        what="ARN Code ${tag}"
+        api_path="releases/tags/${tag}"
+    else
+        what="the latest ARN Code release"
+        api_path="releases/latest"
+    fi
+    if ! github_api "${api_path}" "${temporary_dir}/release.json"; then
+        if [ "${api_status}" = 404 ] && [ -n "${tag}" ]; then
+            echo "There is no ARN Code release ${tag} (no published release has that tag in ${repository})." >&2
+        elif [ "${api_status}" = 404 ]; then
+            echo "${repository} has no published stable ARN Code release." >&2
+        else
+            echo "Could not look up ${what}: ${api_problem}." >&2
+        fi
+        echo "ARN Code was not installed." >&2
+        exit 1
+    fi
+    if ! summarize "${temporary_dir}/release.json" one "${temporary_dir}/release.sum" ||
+        [ "$(wc -l < "${temporary_dir}/release.sum" | tr -d ' ')" != 1 ]; then
+        echo "GitHub returned malformed release metadata for ${what}; ARN Code was not installed." >&2
+        exit 1
+    fi
+    IFS='	' read -r _ found_tag is_draft is_prerelease archive_assets sums_assets metadata_valid < "${temporary_dir}/release.sum"
+    if [ "${metadata_valid}" != 1 ] || { [ -n "${tag}" ] && [ "${found_tag}" != "${tag}" ]; }; then
+        echo "GitHub returned malformed release metadata for ${what}; ARN Code was not installed." >&2
+        exit 1
+    fi
+    if [ -z "${tag}" ] && { [ "${is_draft}" = 1 ] || [ "${is_prerelease}" = 1 ]; }; then
+        echo "GitHub named ${found_tag}, a draft or prerelease, as the latest release; it is not installed without ARN_VERSION." >&2
+        exit 1
+    fi
+    if [ "${is_draft}" = 1 ]; then
+        echo "ARN Code ${tag} is an unpublished draft release; it is not installed." >&2
+        exit 1
+    fi
+    if [ "${archive_assets}" -gt 1 ] || [ "${sums_assets}" -gt 1 ]; then
+        echo "GitHub returned malformed release metadata for ${what} (an asset is listed twice); ARN Code was not installed." >&2
+        exit 1
+    fi
+    if [ -z "${tag}" ]; then
+        tag="${found_tag}"
+        if [ "${archive_assets}" = 0 ]; then
+            stop_without_release "The latest ARN Code release, ${tag}, has no ${archive_name} (no build for ${system} ${machine})."
+        fi
+        if [ "${sums_assets}" = 0 ]; then
+            stop_without_release "The latest ARN Code release, ${tag}, has no SHA256SUMS, so its ${archive_name} cannot be verified."
+        fi
+    else
+        if [ "${archive_assets}" = 0 ]; then
+            echo "ARN Code ${tag} has no ${archive_name} (no build for ${system} ${machine}); ARN Code was not installed." >&2
+            exit 1
+        fi
+        if [ "${sums_assets}" = 0 ]; then
+            echo "ARN Code ${tag} has no SHA256SUMS, so its ${archive_name} cannot be verified; ARN Code was not installed." >&2
+            exit 1
+        fi
+        if [ "${is_prerelease}" = 1 ]; then
+            echo "Note: ${tag} is a prerelease; it is installed because ARN_VERSION names it."
+        fi
+    fi
+    retry_command="$(install_command "${tag#v}" | sed 's/| ARN_/| ARN_ALLOW_DOWNGRADE=1 ARN_/')"
+    check_downgrade "${tag#v}" ", for example:
+  ${retry_command}"
+
+    releases="https://github.com/${repository}/releases"
+    echo "Downloading ARN Code ${tag} (${package})..."
+    if ! curl --fail --location --show-error --silent --proto '=https' "${releases}/download/${tag}/SHA256SUMS" --output "${manifest}"; then
+        echo "Could not download SHA256SUMS for ${tag}; the archive cannot be verified, so it is not installed." >&2
+        exit 1
+    fi
+fi
+
 [ -s "${manifest}" ] || fail_verification "SHA256SUMS is missing or empty."
 if grep -Evq '^[0-9A-Fa-f]{64} [ *][A-Za-z0-9._-]+$' "${manifest}"; then
     fail_verification "SHA256SUMS contains a malformed line."
@@ -659,6 +1009,12 @@ case "${entries}" in
     *) fail_verification "SHA256SUMS lists ${archive_name} more than once." ;;
 esac
 expected_hash="$(awk -v name="${archive_name}" 'substr($0, 67) == name { print tolower(substr($0, 1, 64)) }' "${manifest}")"
+if [ -n "${archive_override}" ]; then
+    cp "${archive_override}" "${archive}"
+elif ! curl --fail --location --show-error --silent --proto '=https' "${releases}/download/${tag}/${archive_name}" --output "${archive}"; then
+    echo "Could not download ${archive_name} for ${tag}." >&2
+    exit 1
+fi
 if command -v sha256sum >/dev/null 2>&1; then
     actual_hash="$(sha256sum "${archive}" | cut -c1-64)"
 elif command -v shasum >/dev/null 2>&1; then
@@ -691,6 +1047,13 @@ esac
 
 new_version="$(printf '%s\n' "${version}" | awk '{ print $2 }')"
 new_commit="$(printf '%s\n' "${version}" | awk '{ c = $3; gsub(/[()]/, "", c); print (c == "" ? "-" : c) }')"
+if ! is_semver "${new_version}"; then
+    echo "The downloaded ARN executable reports an invalid version ('${new_version}')." >&2
+    exit 1
+fi
+# The version the package itself reports decides (for a local package it is
+# the only one known).
+check_downgrade "${new_version}" "."
 target="${install_dir}/arn"
 
 # Decide what the directory holds before anything in it changes: only files a

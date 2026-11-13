@@ -31,7 +31,7 @@ trap 'chmod -R u+w "$root" 2>/dev/null; rm -rf "$root"' EXIT
 mkdir -p "$root/tmp" "$root/home" "$root/pkg"
 export TMPDIR="$root/tmp" HOME="$root/home" SHELL=/bin/sh
 unset ARN_VERSION ARN_INSTALL_ARCHIVE ARN_INSTALL_CHECKSUMS ARN_REPOSITORY ARN_SKIP_PATH_UPDATE \
-    ARN_PROFILE ARN_UNINSTALL ARN_ADOPT_EXISTING ARN_INSTALL_TEST_FAULT ARN_INSTALL_DIR || true
+    ARN_PROFILE ARN_UNINSTALL ARN_ADOPT_EXISTING ARN_INSTALL_TEST_FAULT ARN_INSTALL_DIR ARN_ALLOW_DOWNGRADE || true
 profile="$root/home/.profile"
 failures=0
 cases=0

@@ -26,7 +26,7 @@ trap 'chmod -R u+w "$root" 2>/dev/null; rm -rf "$root"' EXIT
 mkdir -p "$root/tmp" "$root/home" "$root/pkg"
 export TMPDIR="$root/tmp" HOME="$root/home" SHELL=/bin/sh
 unset ARN_VERSION ARN_INSTALL_ARCHIVE ARN_INSTALL_CHECKSUMS ARN_REPOSITORY ARN_SKIP_PATH_UPDATE \
-    ARN_PROFILE ARN_UNINSTALL ARN_ADOPT_EXISTING ARN_INSTALL_TEST_FAULT ARN_INSTALL_DIR || true
+    ARN_PROFILE ARN_UNINSTALL ARN_ADOPT_EXISTING ARN_INSTALL_TEST_FAULT ARN_INSTALL_DIR ARN_ALLOW_DOWNGRADE || true
 profile="$root/home/.profile"
 failures=0
 cases=0
@@ -152,9 +152,12 @@ check_unchanged() { # check_unchanged <name> <fragment> <package> [VAR=value ...
 }
 check_unchanged "checksum mismatch leaves the installation intact" "but SHA256SUMS lists" badsum
 check_unchanged "corrupt archive leaves the installation intact" "" corrupt
-check_unchanged "activation failure keeps the previous arn" "The previous installation was kept" v1 ARN_INSTALL_TEST_FAULT=activate
-check_unchanged "verification failure restores the previous arn" "The installed ARN executable failed its version check" v1 ARN_INSTALL_TEST_FAULT=verify
-check_unchanged "manifest failure restores the previous arn" "Injected test failure at manifest" v1 ARN_INSTALL_TEST_FAULT=manifest
+# These replace 2.0.0 with 1.0.0, a downgrade, so they allow one: what they
+# test is the rollback.
+check_unchanged "activation failure keeps the previous arn" "The previous installation was kept" v1 ARN_ALLOW_DOWNGRADE=1 ARN_INSTALL_TEST_FAULT=activate
+check_unchanged "verification failure restores the previous arn" "The installed ARN executable failed its version check" v1 ARN_ALLOW_DOWNGRADE=1 ARN_INSTALL_TEST_FAULT=verify
+check_unchanged "manifest failure restores the previous arn" "Injected test failure at manifest" v1 ARN_ALLOW_DOWNGRADE=1 ARN_INSTALL_TEST_FAULT=manifest
+check_unchanged "a downgrade is refused before anything changes" "Downgrade refused: ARN Code 2.0.0 is installed in $dir, and 1.0.0 is older." v1
 
 # A failed fresh install takes out the profile lines it added and the
 # directory it created.

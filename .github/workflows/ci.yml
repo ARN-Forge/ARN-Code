@@ -156,12 +156,13 @@ jobs:
           default_sigpipe() { /usr/bin/perl -e '$SIG{PIPE}="DEFAULT"; exec @ARGV or die "exec $ARGV[0]: $!\n"' "$@"; }
           default_sigpipe /bin/bash -c '/usr/bin/perl -e '\''print "SIGPIPE for the tests: ", ($SIG{PIPE} || "DEFAULT"), "\n"'\'''
           for script in scripts/install.sh scripts/package-unix.sh scripts/check-min-os.sh tests/install_unix_test.sh \
-                        tests/install_unix_upgrade_test.sh tests/install_unix_recovery_test.sh tests/package_unix_test.sh; do
+                        tests/install_resolver_test.sh tests/install_unix_upgrade_test.sh tests/install_unix_recovery_test.sh \
+                        tests/package_unix_test.sh; do
             /bin/bash -n "$script"
           done
           /bin/sh -n scripts/install.sh
           default_sigpipe /bin/bash tests/package_unix_test.sh scripts/package-unix.sh "$(command -v python3)"
-          for test in install_unix_test install_unix_upgrade_test install_unix_recovery_test; do
+          for test in install_unix_test install_resolver_test install_unix_upgrade_test install_unix_recovery_test; do
             echo "::group::$test with /bin/bash"
             default_sigpipe /bin/bash "tests/$test.sh" scripts/install.sh
             echo "::endgroup::"

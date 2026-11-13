@@ -265,6 +265,13 @@ if (BUILD_TESTING)
                     -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_checksum_test.ps1
                     -BuildDir $<TARGET_FILE_DIR:arn>)
         set_tests_properties(windows_install_checksums PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+        # Release resolution and downgrade protection in scripts/install.ps1,
+        # against a mocked GitHub API.
+        add_test(NAME windows_install_resolver
+            COMMAND ${ARN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_resolver_test.ps1
+                    -BuildDir $<TARGET_FILE_DIR:arn>)
+        set_tests_properties(windows_install_resolver PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77)
         # Upgrade, rollback, installation manifest and uninstall in scripts/install.ps1.
         add_test(NAME windows_install_upgrade
             COMMAND ${ARN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
@@ -317,6 +324,12 @@ if (BUILD_TESTING)
                 COMMAND ${ARN_BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_unix_test.sh
                         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install.sh)
             set_tests_properties(unix_install_checksums PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+            # Release resolution and downgrade protection in scripts/install.sh,
+            # against a mocked GitHub API, for every platform it supports.
+            add_test(NAME unix_install_resolver
+                COMMAND ${ARN_BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_resolver_test.sh
+                        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install.sh)
+            set_tests_properties(unix_install_resolver PROPERTIES TIMEOUT 300)
             # Upgrade, rollback, installation manifest and uninstall in scripts/install.sh.
             add_test(NAME unix_install_upgrade
                 COMMAND ${ARN_BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_unix_upgrade_test.sh
@@ -451,12 +464,12 @@ if (BUILD_TESTING)
     endif()
     if (WIN32)
         list(APPEND _arn_integration_tests windows_install windows_package_verification
-            windows_install_checksums windows_install_upgrade windows_install_recovery)
+            windows_install_checksums windows_install_resolver windows_install_upgrade windows_install_recovery)
         set_tests_properties(terminal_windows_input terminal_windows_alternate PROPERTIES
             LABELS "console;integration")
     else()
-        foreach(_arn_unix_test IN ITEMS unix_package_verification unix_install_checksums unix_install_upgrade
-                unix_install_recovery)
+        foreach(_arn_unix_test IN ITEMS unix_package_verification unix_install_checksums unix_install_resolver
+                unix_install_upgrade unix_install_recovery)
             if (TEST ${_arn_unix_test})
                 list(APPEND _arn_integration_tests ${_arn_unix_test})
             endif()

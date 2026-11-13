@@ -22,7 +22,7 @@ root="$(mktemp -d "${TMPDIR:-/tmp}/arn-install-test.XXXXXX")"
 trap 'rm -rf "$root"' EXIT
 mkdir -p "$root/tmp" "$root/home" "$root/shim" "$root/releases"
 export TMPDIR="$root/tmp" HOME="$root/home" ARN_SKIP_PATH_UPDATE=1
-unset ARN_VERSION ARN_INSTALL_ARCHIVE ARN_INSTALL_CHECKSUMS ARN_REPOSITORY || true
+unset ARN_VERSION ARN_INSTALL_ARCHIVE ARN_INSTALL_CHECKSUMS ARN_REPOSITORY ARN_ALLOW_DOWNGRADE || true
 failures=0
 cases=0
 
@@ -40,30 +40,46 @@ printf '# ARN\n' > "$root/payload/$package/README.md"
 good_hash="$(hash_of "$root/$archive_name")"
 other_hash="$(printf 'other' > "$root/other" && hash_of "$root/other")"
 
-# Fake curl: FAKE_LATEST_TAG answers the releases/latest redirect; downloads
-# map .../releases/download/<tag>/<file> to $root/releases/<tag>/<file>.
+# Fake curl. The GitHub API describes the release in $root/releases/<tag>
+# (its files are the assets; HTTP 404 without that directory), and
+# releases/latest the one FAKE_LATEST_TAG names (404 when it is empty);
+# downloads map .../releases/download/<tag>/<file> to
+# $root/releases/<tag>/<file>. (tests/install_resolver_test.sh covers
+# release resolution in depth.)
 cat > "$root/shim/curl" <<EOF
 #!/bin/sh
-url=""; output=""; head=0; write_out=""
+url=""; output=""; write_out=""
 while [ \$# -gt 0 ]; do
     case "\$1" in
         --output|-o) output="\$2"; shift ;;
         --write-out|-w) write_out="\$2"; shift ;;
-        --head|-I) head=1 ;;
+        --header|-H|--user-agent|-A|--connect-timeout|--max-time|--proto|--dump-header|-D) shift ;;
         http*) url="\$1" ;;
     esac
     shift
 done
 printf '%s\n' "\$url" >> "$root/curl.log"
-if [ "\$head" = 1 ]; then
-    case "\$url" in
-        */releases/latest) ;;
-        *) exit 22 ;;
-    esac
-    [ -n "\${FAKE_LATEST_TAG:-}" ] || exit 22
-    [ -n "\$write_out" ] && printf '%s' "https://github.com/owner/repo/releases/tag/\${FAKE_LATEST_TAG}"
-    exit 0
-fi
+case "\$url" in
+    https://api.github.com/*)
+        case "\$url" in
+            */releases/latest) tag="\${FAKE_LATEST_TAG:-}" ;;
+            */releases/tags/*) tag="\${url##*/}" ;;
+            *) tag="" ;;
+        esac
+        status=404
+        printf '{"message":"Not Found"}' > "\$output"
+        if [ -n "\$tag" ] && { [ -d "$root/releases/\$tag" ] || [ "\$tag" = "\${FAKE_LATEST_TAG:-}" ]; }; then
+            status=200
+            assets=""
+            for file in "$root/releases/\$tag"/*; do
+                [ -f "\$file" ] && assets="\$assets\${assets:+,}{\"name\":\"\${file##*/}\"}"
+            done
+            printf '{"tag_name":"%s","draft":false,"prerelease":false,"assets":[%s]}' "\$tag" "\$assets" > "\$output"
+        fi
+        [ -n "\$write_out" ] && printf '%s' "\$status"
+        exit 0
+        ;;
+esac
 path="\${url#*/releases/download/}"
 [ "\$path" != "\$url" ] && [ -f "$root/releases/\$path" ] || exit 22
 cp "$root/releases/\$path" "\$output"
@@ -150,22 +166,25 @@ run "local archive without a manifest" fail "ARN_INSTALL_ARCHIVE needs ARN_INSTA
 publish v1.2.3 "$good_hash  $archive_name
 "
 run "explicit version X.Y.Z" pass "Downloading ARN Code v1.2.3" ARN_VERSION=1.2.3
-expected_urls="https://github.com/ARN-Forge/ARN-Code/releases/download/v1.2.3/$archive_name
-https://github.com/ARN-Forge/ARN-Code/releases/download/v1.2.3/SHA256SUMS"
-if [ "$(cat "$root/curl.log")" != "$expected_urls" ]; then
+# The release is looked up first; SHA256SUMS is downloaded before the archive.
+expected_urls="https://github.com/ARN-Forge/ARN-Code/releases/download/v1.2.3/SHA256SUMS
+https://github.com/ARN-Forge/ARN-Code/releases/download/v1.2.3/$archive_name"
+if [ "$(cat "$root/curl.log")" != "https://api.github.com/repos/ARN-Forge/ARN-Code/releases/tags/v1.2.3
+$expected_urls" ]; then
     echo "FAIL: explicit version requested: $(cat "$root/curl.log")"; failures=$((failures + 1))
 fi
 run "explicit version vX.Y.Z" pass "Downloading ARN Code v1.2.3" ARN_VERSION=v1.2.3
 run "latest resolves to one tag" pass "Downloading ARN Code v1.2.3" FAKE_LATEST_TAG=v1.2.3
-if [ "$(sed -n '2,3p' "$root/curl.log")" != "$expected_urls" ]; then
+if [ "$(cat "$root/curl.log")" != "https://api.github.com/repos/ARN-Forge/ARN-Code/releases/latest
+$expected_urls" ]; then
     echo "FAIL: latest requested: $(cat "$root/curl.log")"; failures=$((failures + 1))
 fi
-run "latest with an unexpected tag" fail "unexpected tag" "FAKE_LATEST_TAG=../../evil"
-run "latest unavailable" fail "Could not find the latest ARN Code release" FAKE_LATEST_TAG=
+run "latest with an unexpected tag" fail "malformed release metadata" "FAKE_LATEST_TAG=../../evil"
+run "latest unavailable" fail "has no published stable ARN Code release" FAKE_LATEST_TAG=
 mkdir -p "$root/releases/v2.0.0"
 cp "$root/$archive_name" "$root/releases/v2.0.0/$archive_name"
-run "release without SHA256SUMS" fail "Could not download SHA256SUMS for v2.0.0" ARN_VERSION=2.0.0
-run "release without the archive" fail "Could not download $archive_name for v9.9.9" ARN_VERSION=9.9.9
+run "release without SHA256SUMS" fail "ARN Code v2.0.0 has no SHA256SUMS" ARN_VERSION=2.0.0
+run "release that does not exist" fail "There is no ARN Code release v9.9.9" ARN_VERSION=9.9.9
 publish v3.0.0 "$other_hash  $archive_name
 "
 run "downloaded archive with a wrong checksum" fail "but SHA256SUMS lists $other_hash" ARN_VERSION=3.0.0
