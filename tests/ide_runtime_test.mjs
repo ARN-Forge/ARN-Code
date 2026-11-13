@@ -21,6 +21,8 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 
 const exe = path.resolve(process.argv[2] || '');
@@ -34,22 +36,98 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? 'ok' : 'FAIL'}: ${name}${detail ? ` (${detail})` : ''}`); };
 
+// The IDE's own output is kept for diagnosis: the last 4 KB of each stream,
+// with anything that looks like a key or token masked. The environment is
+// never printed.
+const tail = { stdout: '', stderr: '' };
+const keep = (stream, chunk) => { tail[stream] = (tail[stream] + chunk.toString('utf8')).slice(-4096); };
+const mask = text => text
+  .replace(/\b(?:sk|pk|rk|ghp|gho|ghs|ghu|github_pat|xox[abprs]|AIza)[-_A-Za-z0-9]{8,}/g, '[masked]')
+  .replace(/[A-Za-z0-9+/_-]{32,}={0,2}/g, '[masked]');
+let spawnError = null;
+let exited = null;
 const child = spawn(exe, [], {
   env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` },
-  stdio: 'ignore', windowsHide: false,
+  stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false,
 });
+child.on('error', error => { spawnError = error; });
+child.on('exit', (code, signal) => { exited = { code, signal }; });
+child.stdout.on('data', chunk => keep('stdout', chunk));
+child.stderr.on('data', chunk => keep('stderr', chunk));
+
+// Whether anything accepts TCP connections on the DevTools port.
+const tcpOpen = () => new Promise(resolve => {
+  const socket = net.connect(port, '127.0.0.1');
+  socket.setTimeout(1000, () => { socket.destroy(); resolve(false); });
+  socket.once('connect', () => { socket.destroy(); resolve(true); });
+  socket.once('error', () => resolve(false));
+});
+
+// Facts about the WebView2 Runtime and the runner, for a failed start.
+function environmentReport() {
+  const lines = [];
+  const reg = key => {
+    try {
+      return execFileSync('reg', ['query', key, '/v', 'pv'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        .match(/pv\s+REG_SZ\s+(\S+)/)?.[1] || 'key without version';
+    } catch { return 'not found'; }
+  };
+  const clientKey = 'Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  lines.push(`WebView2 Runtime per machine: ${reg(`HKLM\\SOFTWARE\\WOW6432Node\\${clientKey}`)}; per user: ${reg(`HKCU\\SOFTWARE\\${clientKey}`)}`);
+  let webviewProcesses = 'unknown';
+  try {
+    webviewProcesses = String(execFileSync('tasklist', ['/FI', 'IMAGENAME eq msedgewebview2.exe', '/FO', 'CSV', '/NH'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      .split(/\r?\n/).filter(line => /msedgewebview2\.exe/i.test(line)).length);
+  } catch { /* tasklist unavailable */ }
+  lines.push(`msedgewebview2.exe processes on this machine (any application): ${webviewProcesses}`);
+  const webviewData = path.join(profile, 'EBWebView');
+  lines.push(`WebView2 user data folder ${webviewData}: ${fs.existsSync(webviewData) ? 'created' : 'not created'}`);
+  lines.push(`Windows ${os.release()} (${os.version()}), session ${process.env.SESSIONNAME || '(no SESSIONNAME)'}, ` +
+    `GitHub Actions: ${process.env.GITHUB_ACTIONS === 'true' ? `yes, runner ${process.env.RUNNER_NAME || '?'} (${process.env.ImageOS || '?'} ${process.env.ImageVersion || ''})` : 'no'}`);
+  return lines;
+}
+
 let socket;
 try {
-  // The application's page target.
+  // The application's page target. If it does not appear, the test fails and
+  // says which stage was reached.
   let target;
-  for (let i = 0; i < 120 && !target; i++) {
+  let everTcp = false;
+  let everHttp = false;
+  let lastHttpError = '';
+  let lastList = [];
+  const deadline = Date.now() + 60000;
+  while (!target && !exited && !spawnError && Date.now() < deadline) {
     await sleep(250);
+    if (!(await tcpOpen())) continue;
+    everTcp = true;
     try {
-      const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+      const list = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(3000) })).json();
+      everHttp = true;
+      lastList = list.map(t => `${t.type} ${t.url}`);
       target = list.find(t => t.type === 'page' && /^https?:\/\/tauri\.localhost\//.test(t.url));
-    } catch { /* not listening yet */ }
+    } catch (error) {
+      lastHttpError = `${error.name}: ${error.message}`;
+    }
   }
-  assert.ok(target, 'the IDE page did not appear on the DevTools port');
+  if (!target) {
+    if (!exited && !spawnError) await sleep(500);   // pick up an exit that is just happening
+    let diagnosis;
+    if (spawnError) diagnosis = `the IDE process did not start: ${spawnError.code || ''} ${spawnError.message}`;
+    else if (exited) {
+      const hex = typeof exited.code === 'number' ? ` (0x${(exited.code >>> 0).toString(16).toUpperCase()})` : '';
+      diagnosis = `the IDE process exited with code ${exited.code}${hex}${exited.signal ? `, signal ${exited.signal}` : ''} before its page appeared`;
+    } else if (!everTcp) diagnosis = `the IDE process is running, but nothing listened on DevTools port ${port} within 60 s (WebView2 did not open it)`;
+    else if (!everHttp) diagnosis = `DevTools port ${port} accepted connections but never answered /json/list (${lastHttpError || 'no response'})`;
+    else diagnosis = `DevTools answered, but no tauri.localhost page target appeared; targets: ${JSON.stringify(lastList)}`;
+    console.log(`DIAGNOSIS: ${diagnosis}`);
+    for (const line of environmentReport()) console.log(`  ${line}`);
+    for (const stream of ['stdout', 'stderr']) {
+      const text = mask(tail[stream]).trim();
+      console.log(`  IDE ${stream} (last ${text.length} characters): ${text ? `\n${text.split(/\r?\n/).map(l => `    ${l}`).join('\n')}` : '(empty)'}`);
+    }
+  }
+  assert.ok(target, 'the IDE page did not appear on the DevTools port within 60 s');
 
   socket = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
