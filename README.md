@@ -80,6 +80,11 @@ profile when needed, and verifies the executable. Unix archives use system
 OpenSSL libraries: on Linux install the OpenSSL runtime supplied by your
 distribution; on macOS run `brew install openssl@3` first.
 
+Minimum systems for the release archives: macOS 15 (Apple Silicon or Intel)
+with Homebrew's `openssl@3`; Linux x64 with glibc 2.39 or later, the
+libstdc++ of GCC 13 or later and OpenSSL 3 (for example Ubuntu 24.04 or
+Debian 13; Ubuntu 22.04 and Debian 12 are too old).
+
 To install a specific release (v0.9.0 or later) instead of the latest:
 
 ```bash
@@ -286,6 +291,10 @@ the Microsoft Visual C++ runtime DLLs that `arn.exe` imports (for example
 unchanged, Microsoft-signed, from Visual Studio's redistributable folder for
 the compiler that built the release (app-local deployment). Windows Update
 does not service app-local copies; they are updated with each ARN release.
+
+Every release archive contains `THIRD-PARTY-NOTICES.txt` with the licenses of
+the third-party software in it; the Windows IDE packages also contain
+`THIRD-PARTY-NOTICES-IDE.txt` for the IDE's Rust crates and npm packages.
 
 ## First request
 

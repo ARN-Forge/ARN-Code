@@ -245,6 +245,10 @@ try {
     New-Zip $zip @($standard | Where-Object { $_[0] -ne 'LICENSE' })
     Test-Verify "missing LICENSE" $zip $false @("missing 'LICENSE'")
 
+    $zip = Join-Path $root "missing-notices.zip"
+    New-Zip $zip @($standard | Where-Object { $_[0] -ne 'THIRD-PARTY-NOTICES.txt' })
+    Test-Verify "missing third-party notices" $zip $false @("missing 'THIRD-PARTY-NOTICES.txt'")
+
     $zip = Join-Path $root "extra.zip"
     New-Zip $zip ($standard + , @('notes.txt', 'extra'))
     Test-Verify "unexpected file" $zip $false @("unexpected entry 'notes.txt'")

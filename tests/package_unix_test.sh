@@ -71,6 +71,7 @@ verify() {
 
 license="LICENSE|file|644|MIT"
 readme="README.md|file|644|# ARN"
+notices="THIRD-PARTY-NOTICES.txt|file|644|ARN Code - third-party notices"
 
 # Valid package from a binary, then the same archive verified on its own.
 printf '%s' "$good_arn" > "$root/arn"
@@ -80,7 +81,7 @@ expect "package a valid archive" pass "Verified" -- \
     --version "$version" --commit "$commit"
 expect "verify the packaged archive" pass "Extracted arn: arn 1.2.3 (0123456789ab)" -- verify "$root/good.tar.gz"
 listing="$(tar -tzf "$root/good.tar.gz" | sort | tr '\n' ' ')"
-if [ "$listing" != "$name/LICENSE $name/README.md $name/arn " ]; then
+if [ "$listing" != "$name/LICENSE $name/README.md $name/THIRD-PARTY-NOTICES.txt $name/arn " ]; then
     echo "FAIL: packaged archive lists '$listing'"
     failures=$((failures + 1))
 fi
@@ -105,33 +106,36 @@ if [ -e "$root/failing.tar.gz" ]; then
 fi
 
 # Malformed archives.
-craft "$root/missing.tar.gz" "$name/arn|file|755|$good_arn" "$name/$readme"
+craft "$root/missing.tar.gz" "$name/arn|file|755|$good_arn" "$name/$readme" "$name/$notices"
 expect "missing LICENSE" fail "missing: [$name/LICENSE]" -- verify "$root/missing.tar.gz"
 
-craft "$root/extra.tar.gz" "$name/arn|file|755|$good_arn" "$name/$license" "$name/$readme" \
+craft "$root/missing-notices.tar.gz" "$name/arn|file|755|$good_arn" "$name/$license" "$name/$readme"
+expect "missing third-party notices" fail "missing: [$name/THIRD-PARTY-NOTICES.txt]" -- verify "$root/missing-notices.tar.gz"
+
+craft "$root/extra.tar.gz" "$name/arn|file|755|$good_arn" "$name/$license" "$name/$readme" "$name/$notices" \
     "$name/notes.txt|file|644|extra"
 expect "unexpected file" fail "unexpected: [$name/notes.txt]" -- verify "$root/extra.tar.gz"
 
-craft "$root/apple.tar.gz" "$name/arn|file|755|$good_arn" "$name/$license" "$name/$readme" \
+craft "$root/apple.tar.gz" "$name/arn|file|755|$good_arn" "$name/$license" "$name/$readme" "$name/$notices" \
     "$name/._arn|file|644|metadata"
 expect "macOS AppleDouble entry" fail "unexpected: [$name/._arn]" -- verify "$root/apple.tar.gz"
 
-craft "$root/duplicate.tar.gz" "$name/arn|file|755|$good_arn" "$name/$license" "$name/$readme" \
+craft "$root/duplicate.tar.gz" "$name/arn|file|755|$good_arn" "$name/$license" "$name/$readme" "$name/$notices" \
     "$name/$license"
 expect "duplicate entry" fail "duplicate archive entries: $name/LICENSE" -- verify "$root/duplicate.tar.gz"
 
-craft "$root/traversal.tar.gz" "$name/arn|file|755|$good_arn" "$name/$license" "$name/$readme" \
+craft "$root/traversal.tar.gz" "$name/arn|file|755|$good_arn" "$name/$license" "$name/$readme" "$name/$notices" \
     "$name/../evil|file|644|evil"
 expect "path traversal entry" fail "path traversal in archive: '$name/../evil'" -- verify "$root/traversal.tar.gz"
 
-craft "$root/absolute.tar.gz" "$name/arn|file|755|$good_arn" "$name/$license" "$name/$readme" \
+craft "$root/absolute.tar.gz" "$name/arn|file|755|$good_arn" "$name/$license" "$name/$readme" "$name/$notices" \
     "/tmp/arn-evil|file|644|evil"
 expect "absolute path entry" fail "absolute path in archive" -- verify "$root/absolute.tar.gz"
 
-craft "$root/symlink.tar.gz" "$name/arn|symlink|/bin/sh" "$name/$license" "$name/$readme"
+craft "$root/symlink.tar.gz" "$name/arn|symlink|/bin/sh" "$name/$license" "$name/$readme" "$name/$notices"
 expect "arn is a symbolic link" fail "is not a regular file" -- verify "$root/symlink.tar.gz"
 
-craft "$root/noexec.tar.gz" "$name/arn|file|644|$good_arn" "$name/$license" "$name/$readme"
+craft "$root/noexec.tar.gz" "$name/arn|file|644|$good_arn" "$name/$license" "$name/$readme" "$name/$notices"
 expect "arn is not executable" fail "is not executable" -- verify "$root/noexec.tar.gz"
 
 craft "$root/wrongdir.tar.gz" "other/arn|file|755|$good_arn" "other/$license" "other/$readme"

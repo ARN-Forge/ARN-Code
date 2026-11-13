@@ -271,6 +271,27 @@ if (BUILD_TESTING)
                     -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_recovery_test.ps1
                     -BuildDir $<TARGET_FILE_DIR:arn>)
         set_tests_properties(windows_install_recovery PROPERTIES TIMEOUT 400 SKIP_RETURN_CODE 77)
+        # IDE package verification (scripts/verify-ide-package.ps1) against
+        # stand-ins for arn.exe and arn-ide.exe: the current version and
+        # commit, a "-dirty" build, and an IDE with an older version resource.
+        function(arn_ide_package_fixture target rc_version version_line)
+            set(ARN_FIXTURE_RC_VERSION "${rc_version}")
+            configure_file(tests/ide_package_fixture.rc.in
+                           "${CMAKE_CURRENT_BINARY_DIR}/${target}.rc" @ONLY)
+            add_executable(${target} tests/ide_package_fixture.cpp
+                           "${CMAKE_CURRENT_BINARY_DIR}/${target}.rc")
+            target_compile_definitions(${target} PRIVATE "ARN_FIXTURE_VERSION_LINE=\"${version_line}\"")
+        endfunction()
+        arn_ide_package_fixture(ide_fixture_current "${PROJECT_VERSION}" "arn ${PROJECT_VERSION} (0123456789ab)")
+        arn_ide_package_fixture(ide_fixture_dirty "${PROJECT_VERSION}" "arn ${PROJECT_VERSION} (0123456789ab-dirty)")
+        arn_ide_package_fixture(ide_fixture_old "0.0.1" "arn 0.0.1 (0123456789ab)")
+        add_test(NAME ide_package_verification
+            COMMAND ${ARN_POWERSHELL_EXECUTABLE} -NoProfile -ExecutionPolicy Bypass
+                    -File ${CMAKE_CURRENT_SOURCE_DIR}/tests/ide_package_test.ps1
+                    -FixtureDir $<TARGET_FILE_DIR:ide_fixture_current>
+                    -BuildDir $<TARGET_FILE_DIR:arn>
+                    -Version ${PROJECT_VERSION})
+        set_tests_properties(ide_package_verification PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
     else()
         # Release tar.gz packaging and verification (scripts/package-unix.sh);
         # Python writes the malformed test archives.

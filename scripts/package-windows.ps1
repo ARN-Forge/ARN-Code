@@ -73,6 +73,7 @@ while ($queue.Count) {
 $root = Split-Path -Parent $PSScriptRoot
 Copy-Item -LiteralPath (Join-Path $root "LICENSE") -Destination $OutputDir
 Copy-Item -LiteralPath (Join-Path $root "README.md") -Destination $OutputDir
+Copy-Item -LiteralPath (Join-Path $root "THIRD-PARTY-NOTICES.txt") -Destination $OutputDir
 
 # True when the error, or an exception inside it, is Windows' "file in use":
 # exactly HRESULT 0x80070020 (ERROR_SHARING_VIOLATION) or 0x80070021

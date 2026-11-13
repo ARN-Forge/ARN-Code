@@ -6,14 +6,16 @@
 #   package-unix.sh verify  --archive <file.tar.gz> --name <dir>
 #                           --version <X.Y.Z> --commit <sha>
 #
-# The archive holds exactly <dir>/arn, <dir>/LICENSE and <dir>/README.md.
+# The archive holds exactly <dir>/arn, <dir>/LICENSE, <dir>/README.md and
+# <dir>/THIRD-PARTY-NOTICES.txt.
 # verify rejects missing, unexpected and duplicate entries, absolute and ".."
 # paths, links and other non-regular entries, and a non-executable arn. It
 # then extracts the archive into a fresh temporary directory, runs the
 # extracted arn --version with a minimal environment, requires exactly
 # "arn <version> (<first 12 digits of commit>)", and lists the executable's
 # shared libraries (ldd on Linux, otool -L on macOS).
-# package builds the archive from the binary, LICENSE and README.md only, and
+# package builds the archive from the binary, LICENSE, README.md and
+# THIRD-PARTY-NOTICES.txt only, and
 # deletes it again if verification fails. Temporary files are always removed.
 # Written for bash 3.2 (macOS) as well as newer bash, and for GNU and BSD tar.
 
@@ -151,7 +153,7 @@ verify_archive() {
         fail "duplicate archive entries: $(sort "$names" | uniq -d | tr '\n' ' ')"
     fi
 
-    printf '%s\n' "$name/LICENSE" "$name/README.md" "$name/arn" | sort > "$work/expected"
+    printf '%s\n' "$name/LICENSE" "$name/README.md" "$name/THIRD-PARTY-NOTICES.txt" "$name/arn" | sort > "$work/expected"
     sort "$names" > "$work/actual"
     if ! cmp -s "$work/expected" "$work/actual"; then
         local missing unexpected
@@ -210,18 +212,19 @@ if [ "$mode" = "package" ]; then
     cp "$binary" "$staging/$name/arn"
     cp "$repo_root/LICENSE" "$staging/$name/LICENSE"
     cp "$repo_root/README.md" "$staging/$name/README.md"
+    cp "$repo_root/THIRD-PARTY-NOTICES.txt" "$staging/$name/THIRD-PARTY-NOTICES.txt"
     chmod 755 "$staging/$name/arn"
-    chmod 644 "$staging/$name/LICENSE" "$staging/$name/README.md"
+    chmod 644 "$staging/$name/LICENSE" "$staging/$name/README.md" "$staging/$name/THIRD-PARTY-NOTICES.txt"
 
     archive_dir="$(cd "$(dirname "$archive")" && pwd)"
     archive="$archive_dir/$(basename "$archive")"
     rm -f "$archive"
     archive_to_remove="$archive"
     # COPYFILE_DISABLE keeps macOS tar from adding AppleDouble "._" entries.
-    (cd "$staging" && COPYFILE_DISABLE=1 tar -czf "$archive" "$name/arn" "$name/LICENSE" "$name/README.md") ||
+    (cd "$staging" && COPYFILE_DISABLE=1 tar -czf "$archive" "$name/arn" "$name/LICENSE" "$name/README.md" "$name/THIRD-PARTY-NOTICES.txt") ||
         fail "could not create '$archive'"
 fi
 
 verify_archive
 archive_to_remove=""
-echo "Verified $archive: $name/arn, $name/LICENSE, $name/README.md"
+echo "Verified $archive: $name/arn, $name/LICENSE, $name/README.md, $name/THIRD-PARTY-NOTICES.txt"

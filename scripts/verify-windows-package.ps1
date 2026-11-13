@@ -7,7 +7,8 @@ param(
 
 # Verifies the Windows CLI ZIP:
 #   - entries are flat file names, without duplicates, directories, rooted
-#     paths or "..": arn.exe, LICENSE, README.md and DLLs only;
+#     paths or "..": arn.exe, LICENSE, README.md, THIRD-PARTY-NOTICES.txt and
+#     DLLs only;
 #   - every packaged DLL is x64 and imported, directly or through another
 #     packaged DLL, by arn.exe (nothing unrelated is shipped);
 #   - every import is packaged, a Windows component in System32, or an API
@@ -57,11 +58,11 @@ foreach ($entry in $entries) {
     $seen[$key] = $true
     if ($entry -match '[\\/]' -or $entry -match '^\.\.?$' -or $entry -match ':' -or $entry -eq '') {
         $problems.Add("entry '$entry' is not a plain file name (no directories, '..' or rooted paths)")
-    } elseif ($entry -notin @('arn.exe', 'LICENSE', 'README.md') -and $entry -notmatch '^[^\\/:]+\.dll$') {
+    } elseif ($entry -notin @('arn.exe', 'LICENSE', 'README.md', 'THIRD-PARTY-NOTICES.txt') -and $entry -notmatch '^[^\\/:]+\.dll$') {
         $problems.Add("unexpected entry '$entry'")
     }
 }
-foreach ($required in @('arn.exe', 'LICENSE', 'README.md')) {
+foreach ($required in @('arn.exe', 'LICENSE', 'README.md', 'THIRD-PARTY-NOTICES.txt')) {
     if ($entries -cnotcontains $required) { $problems.Add("missing '$required'") }
 }
 if ($problems.Count) { throw "Invalid package ${ArchivePath}:`n  - $($problems -join "`n  - ")" }
