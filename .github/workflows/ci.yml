@@ -124,6 +124,10 @@ jobs:
       # macOS ships Bash 3.2 as /bin/bash (and as /bin/sh). CTest may pick a
       # newer bash from Homebrew, so the shell scripts and their tests also run
       # here with /bin/bash itself; install.sh runs as sh in these tests.
+      # The runner starts this step with SIGPIPE ignored, and a shell cannot
+      # trap a signal that was ignored on entry (POSIX), so the installer's
+      # SIGPIPE rollback could not be exercised. The tests therefore run with
+      # SIGPIPE restored to its default, as CTest runs them.
       - name: Unix scripts and installer tests with Bash 3.2
         if: runner.os == 'macOS'
         shell: bash
@@ -131,15 +135,19 @@ jobs:
           major_minor="$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"')"
           /bin/bash --version | head -n 1
           if [ "$major_minor" != 3.2 ]; then echo "::error::/bin/bash is $major_minor, not 3.2."; exit 1; fi
+          if [ ! -x /usr/bin/perl ]; then echo "::error::/usr/bin/perl is missing."; exit 1; fi
+          /usr/bin/perl -e 'printf "perl %vd; SIGPIPE in this step: %s\n", $^V, $SIG{PIPE} || "DEFAULT"'
+          default_sigpipe() { /usr/bin/perl -e '$SIG{PIPE}="DEFAULT"; exec @ARGV or die "exec $ARGV[0]: $!\n"' "$@"; }
+          default_sigpipe /bin/bash -c '/usr/bin/perl -e '\''print "SIGPIPE for the tests: ", ($SIG{PIPE} || "DEFAULT"), "\n"'\'''
           for script in scripts/install.sh scripts/package-unix.sh tests/install_unix_test.sh \
                         tests/install_unix_upgrade_test.sh tests/install_unix_recovery_test.sh tests/package_unix_test.sh; do
             /bin/bash -n "$script"
           done
           /bin/sh -n scripts/install.sh
-          /bin/bash tests/package_unix_test.sh scripts/package-unix.sh "$(command -v python3)"
+          default_sigpipe /bin/bash tests/package_unix_test.sh scripts/package-unix.sh "$(command -v python3)"
           for test in install_unix_test install_unix_upgrade_test install_unix_recovery_test; do
             echo "::group::$test with /bin/bash"
-            /bin/bash "tests/$test.sh" scripts/install.sh
+            default_sigpipe /bin/bash "tests/$test.sh" scripts/install.sh
             echo "::endgroup::"
           done
 
