@@ -178,6 +178,12 @@ if (BUILD_TESTING)
         arn::core nlohmann_json::nlohmann_json Threads::Threads)
     add_test(NAME acp_session COMMAND acp_session_test)
     set_tests_properties(acp_session PROPERTIES TIMEOUT 60)
+    # IDE security configuration (no CDN code, CSP, capabilities, IPC
+    # commands); the built bundle and the running IDE are checked by the IDE
+    # jobs of the workflows.
+    add_test(NAME ide_security_config
+        COMMAND ${ARN_TEST_NODE_EXECUTABLE} --test ${CMAKE_CURRENT_SOURCE_DIR}/tests/ide_security_test.mjs)
+    set_tests_properties(ide_security_config PROPERTIES TIMEOUT 60)
     add_executable(acp_subprocess_test tests/acp_subprocess_test.cpp src/acp/acp_subprocess.cpp)
     target_include_directories(acp_subprocess_test PRIVATE include)
     target_link_libraries(acp_subprocess_test PRIVATE Threads::Threads)

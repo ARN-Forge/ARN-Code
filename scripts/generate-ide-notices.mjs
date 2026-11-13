@@ -20,7 +20,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -29,7 +29,9 @@ const output = process.argv[2];
 const allowMissing = process.argv.includes('--allow-missing');
 if (!output) throw new Error('usage: node scripts/generate-ide-notices.mjs <output file> [--allow-missing]');
 
-const licenseFile = /^(licen[cs]e|copying|notice|copyright|unlicense)([-._].*)?$/i;
+// License, notice and copyright files, including third-party notice files
+// such as monaco-editor's ThirdPartyNotices.txt.
+const licenseFile = /^(licen[cs]e|copying|notice|copyright|unlicense|third[-_ ]?party[-_ ]?notices?)([-._].*)?$/i;
 function licenseFiles(dir) {
   return fs.readdirSync(dir, { withFileTypes: true })
     .filter(e => e.isFile() && licenseFile.test(e.name))
@@ -62,8 +64,8 @@ const components = [...crates].map(id => {
 });
 
 // npm packages in the frontend bundle.
-const tree = JSON.parse(execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm',
-  ['ls', '--omit=dev', '--all', '--json'], { cwd: ide, encoding: 'utf8', shell: process.platform === 'win32' }));
+// A fixed command line without outside input (npm is a .cmd file on Windows).
+const tree = JSON.parse(execSync('npm ls --omit=dev --all --json', { cwd: ide, encoding: 'utf8', maxBuffer: 64 << 20 }));
 const seenNpm = new Set();
 (function walk(deps) {
   for (const [name, info] of Object.entries(deps || {})) {
@@ -84,18 +86,34 @@ const seenNpm = new Set();
 
 components.sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
 
+// License files for crates whose package ships none, copied from their
+// repository at the exact commit (ide/third-party-licenses/sources.json).
+const thirdPartyDir = path.join(ide, 'third-party-licenses');
+const upstream = JSON.parse(fs.readFileSync(path.join(thirdPartyDir, 'sources.json'), 'utf8')).crates;
+const gitBlob = text => crypto.createHash('sha1').update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest('hex');
+
 // Group identical license texts.
 const texts = new Map();   // hash -> { text, users: [] }
 const missing = [];
+const notes = [];
+function addText(raw, user) {
+  const text = raw.replace(/\r\n?/g, '\n').replace(/\s+$/, '') + '\n';
+  const hash = crypto.createHash('sha256').update(text).digest('hex');
+  if (!texts.has(hash)) texts.set(hash, { text, users: [] });
+  texts.get(hash).users.push(user);
+}
 for (const c of components) {
   const files = licenseFiles(c.dir);
-  if (!files.length) { missing.push(c); continue; }
-  for (const file of files) {
-    const text = fs.readFileSync(path.join(c.dir, file), 'utf8').replace(/\r\n?/g, '\n').replace(/\s+$/, '') + '\n';
-    const hash = crypto.createHash('sha256').update(text).digest('hex');
-    if (!texts.has(hash)) texts.set(hash, { text, users: [] });
-    texts.get(hash).users.push(`${c.name} ${c.version} (${file})`);
+  for (const file of files) addText(fs.readFileSync(path.join(c.dir, file), 'utf8'), `${c.name} ${c.version} (${file})`);
+  if (files.length) continue;
+  const entry = c.kind === 'crate' ? upstream[`${c.name} ${c.version}`] : undefined;
+  if (!entry) { missing.push(c); continue; }
+  for (const file of entry.files) {
+    const raw = fs.readFileSync(path.join(thirdPartyDir, ...file.path.split('/')), 'utf8').replace(/\r\n?/g, '\n');
+    if (gitBlob(raw) !== file.blob) throw new Error(`${file.path} is not the upstream file (blob ${gitBlob(raw)}, expected ${file.blob})`);
+    addText(raw, `${c.name} ${c.version} (${path.posix.basename(file.path)} from ${entry.repository} at ${entry.commit.slice(0, 12)}; not in the package)`);
   }
+  if (entry.note) notes.push(`  ${c.name} ${c.version}: ${entry.note}`);
 }
 
 const rule = '\n' + '='.repeat(80) + '\n\n';
@@ -112,12 +130,28 @@ The ARN Code backend bundled with the IDE (arn.exe, OpenSSL and Microsoft
 Visual C++ runtime DLLs) is covered by THIRD-PARTY-NOTICES.txt.
 
 The npm packages are the production dependency tree of the frontend, which
-can be more than the bundle contains. In particular the IDE loads the code
-editor (Monaco Editor) at run time from cdn.jsdelivr.net instead of bundling it.
+can be more than the bundle contains. The code editor, Monaco Editor, is
+bundled with the IDE; its own third-party notices (ThirdPartyNotices.txt of
+monaco-editor) are reproduced below with its license.
 
 Components (${components.length}: ${components.filter(c => c.kind === 'crate').length} Rust crates linked into arn-ide.exe, ${components.filter(c => c.kind === 'npm').length} npm packages in the frontend's production dependency tree)
 `;
 for (const c of components) out += `  ${c.kind === 'crate' ? 'crate' : 'npm  '}  ${c.name} ${c.version}  [${c.license || 'no license declared'}]${c.repository ? '  ' + c.repository : ''}\n`;
+// MPL-2.0 (section 3.2) asks that recipients of the executable form be told
+// how to obtain the source code form: these are the published sources of the
+// exact versions in use.
+const mpl = components.filter(c => /\bMPL-2\.0\b/.test(c.license));
+if (mpl.length) {
+  out += rule + 'Source code of the components above that are offered under the Mozilla Public License 2.0\n' +
+    '(the published package of the exact version in use; also see each repository):\n';
+  for (const c of mpl) {
+    const source = c.kind === 'crate'
+      ? `https://crates.io/api/v1/crates/${c.name}/${c.version}/download`
+      : `https://registry.npmjs.org/${c.name}/-/${c.name.split('/').pop()}-${c.version}.tgz`;
+    out += `  ${c.name} ${c.version}  [${c.license}]  ${source}\n`;
+  }
+}
+if (notes.length) out += rule + 'Notes on components whose license files are not in their package:\n' + notes.join('\n') + '\n';
 if (missing.length) {
   out += rule + `Components whose published package contains no license file (declared license and source shown above):\n`;
   for (const c of missing) out += `  ${c.name} ${c.version}  [${c.license || 'no license declared'}]  ${c.repository}\n`;

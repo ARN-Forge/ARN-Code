@@ -89,10 +89,11 @@ for (const [name, source] of files) {
 // Third-party notices ship next to arn-ide.exe in the installer and the
 // portable ZIP: the CLI's (arn.exe, OpenSSL, Visual C++ runtime) and the
 // IDE's own, generated from the license files of the exact Rust crates and
-// npm packages in use. Crates without a license file are listed by name.
+// npm packages in use. A component without a license file, in its package or
+// in ide/third-party-licenses/sources.json, stops the build.
 fs.copyFileSync(path.join(root, 'THIRD-PARTY-NOTICES.txt'), path.join(stage, 'THIRD-PARTY-NOTICES.txt'));
 execFileSync(process.execPath, [path.join(root, 'scripts/generate-ide-notices.mjs'),
-  path.join(stage, 'THIRD-PARTY-NOTICES-IDE.txt'), '--allow-missing'], { stdio: 'inherit' });
+  path.join(stage, 'THIRD-PARTY-NOTICES-IDE.txt')], { stdio: 'inherit' });
 for (const name of ['THIRD-PARTY-NOTICES.txt', 'THIRD-PARTY-NOTICES-IDE.txt']) {
   files.set(name, path.join(stage, name));
   resources[`installer/runtime/${name}`] = name;

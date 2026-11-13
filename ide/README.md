@@ -4,6 +4,16 @@ ARN's desktop editor uses Tauri 2, React and Monaco. Its AI providers, model
 catalogue, conversation and file tools run in the C++ ARN engine through
 `arn --server`. Rust supervises that process and forwards JSONL events.
 
+Security model: all code the window runs is bundled with the application.
+Monaco (`monaco-editor`, pinned in `package.json`) is built into the frontend
+instead of being loaded from a CDN, and the Content Security Policy in
+`src-tauri/tauri.conf.json` allows scripts, workers and connections only from
+the application itself and the Tauri IPC. The page may only listen for
+events (`src-tauri/capabilities/default.json`), and the project folder is
+picked in a dialog that the Rust backend shows; the page cannot name a
+folder to open. `tests/ide_security_test.mjs` and `tests/ide_runtime_test.mjs`
+check this.
+
 ## Windows download
 
 Extract **arn-ide-windows-x64.zip** from the

@@ -1,0 +1,72 @@
+{
+  "description": "License files for crates whose published crates.io package contains none. Each file is copied unchanged from the crate's repository at the exact commit recorded in the package's .cargo_vcs_info.json; blob is its Git blob SHA-1 (LF line endings), which scripts/generate-ide-notices.mjs checks. A crate listed with no files has no license file at that commit; its declared license and source headers are described in note.",
+  "crates": {
+    "alloc-stdlib 0.2.4": {
+      "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+      "commit": "ae42d22078b98549e987d2f03d12df7b984fde47",
+      "files": [{ "path": "rust-alloc-no-stdlib-ae42d22/LICENSE", "blob": "cd496ba72eb37e83a44958358d1f89a8a28cbc15" }]
+    },
+    "unic-char-property 0.9.0": {
+      "repository": "https://github.com/open-i18n/rust-unic",
+      "commit": "5878605364af97a3358368a6eaef02104af2e016",
+      "files": [
+        { "path": "rust-unic-5878605/COPYRIGHT.md", "blob": "0322ceec0b8f15aa2d74a6173c07cc8c6f3764b3" },
+        { "path": "rust-unic-5878605/LICENSE-MIT", "blob": "31aa79387f27e730e33d871925e152e35e428031" },
+        { "path": "rust-unic-5878605/LICENSE-APACHE", "blob": "16fe87b06e802f094b3fbb0894b137bca2b16ef1" }
+      ]
+    },
+    "unic-char-range 0.9.0": {
+      "repository": "https://github.com/open-i18n/rust-unic",
+      "commit": "5878605364af97a3358368a6eaef02104af2e016",
+      "files": [
+        { "path": "rust-unic-5878605/COPYRIGHT.md", "blob": "0322ceec0b8f15aa2d74a6173c07cc8c6f3764b3" },
+        { "path": "rust-unic-5878605/LICENSE-MIT", "blob": "31aa79387f27e730e33d871925e152e35e428031" },
+        { "path": "rust-unic-5878605/LICENSE-APACHE", "blob": "16fe87b06e802f094b3fbb0894b137bca2b16ef1" }
+      ]
+    },
+    "unic-common 0.9.0": {
+      "repository": "https://github.com/open-i18n/rust-unic",
+      "commit": "5878605364af97a3358368a6eaef02104af2e016",
+      "files": [
+        { "path": "rust-unic-5878605/COPYRIGHT.md", "blob": "0322ceec0b8f15aa2d74a6173c07cc8c6f3764b3" },
+        { "path": "rust-unic-5878605/LICENSE-MIT", "blob": "31aa79387f27e730e33d871925e152e35e428031" },
+        { "path": "rust-unic-5878605/LICENSE-APACHE", "blob": "16fe87b06e802f094b3fbb0894b137bca2b16ef1" }
+      ]
+    },
+    "unic-ucd-ident 0.9.0": {
+      "repository": "https://github.com/open-i18n/rust-unic",
+      "commit": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+      "note": "At this commit the three files have the same Git blobs as at 5878605.",
+      "files": [
+        { "path": "rust-unic-5878605/COPYRIGHT.md", "blob": "0322ceec0b8f15aa2d74a6173c07cc8c6f3764b3" },
+        { "path": "rust-unic-5878605/LICENSE-MIT", "blob": "31aa79387f27e730e33d871925e152e35e428031" },
+        { "path": "rust-unic-5878605/LICENSE-APACHE", "blob": "16fe87b06e802f094b3fbb0894b137bca2b16ef1" }
+      ]
+    },
+    "unic-ucd-version 0.9.0": {
+      "repository": "https://github.com/open-i18n/rust-unic",
+      "commit": "5878605364af97a3358368a6eaef02104af2e016",
+      "files": [
+        { "path": "rust-unic-5878605/COPYRIGHT.md", "blob": "0322ceec0b8f15aa2d74a6173c07cc8c6f3764b3" },
+        { "path": "rust-unic-5878605/LICENSE-MIT", "blob": "31aa79387f27e730e33d871925e152e35e428031" },
+        { "path": "rust-unic-5878605/LICENSE-APACHE", "blob": "16fe87b06e802f094b3fbb0894b137bca2b16ef1" }
+      ]
+    },
+    "webview2-com 0.38.2": {
+      "repository": "https://github.com/wravery/webview2-rs",
+      "commit": "b74dc5e2b394044bea5191052868ce7a106c202c",
+      "files": [{ "path": "webview2-rs-b74dc5e/LICENSE", "blob": "de9a7e660e173136b351982a34f715af424ff812" }]
+    },
+    "webview2-com-sys 0.38.2": {
+      "repository": "https://github.com/wravery/webview2-rs",
+      "commit": "b74dc5e2b394044bea5191052868ce7a106c202c",
+      "files": [{ "path": "webview2-rs-b74dc5e/LICENSE", "blob": "de9a7e660e173136b351982a34f715af424ff812" }]
+    },
+    "selectors 0.36.1": {
+      "repository": "https://github.com/servo/stylo",
+      "commit": "635e1a19d02960588a00e189bd4bd5bdb150ec3d",
+      "note": "No license file in the package, in selectors/ or at the repository root at this commit. Its source files carry the MPL-2.0 Exhibit A notice (\"This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0 ...\"); the Cargo.toml declares MPL-2.0 and authors \"The Servo Project Developers\". The MPL-2.0 text reproduced for other crates applies; the source is listed in the MPL-2.0 section.",
+      "files": []
+    }
+  }
+}

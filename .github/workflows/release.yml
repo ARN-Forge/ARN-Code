@@ -239,6 +239,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ../scripts/verify-ide-package.ps1 -Directory src-tauri/target/installer-smoke `
             -ExpectedVersion $env:ARN_EXPECTED_VERSION -ExpectedCommit $env:GITHUB_SHA
+          # The production bundle: Monaco bundled, no CDN code, restrictive CSP.
+          $env:ARN_IDE_DIST = 'dist'
+          node --test ../tests/ide_security_test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package portable IDE
         shell: pwsh
         env:

@@ -6,8 +6,10 @@
 #       The Mach-O LC_BUILD_VERSION minos must equal <minos> (the
 #       CMAKE_OSX_DEPLOYMENT_TARGET the build was configured with).
 #   check-min-os.sh linux <binary> <max GLIBC> <max GLIBCXX> <max CXXABI>
-#       No symbol version the ELF binary needs may be newer than the given
-#       GLIBC_, GLIBCXX_ and CXXABI_ versions (the baseline distribution's).
+#       No version the ELF binary needs (its .gnu.version_r section, which
+#       the dynamic loader checks; read with readelf --version-info) may be
+#       newer than the given GLIBC_, GLIBCXX_ and CXXABI_ versions (the
+#       baseline distribution's). The full list of needed versions is printed.
 #
 # Prints what it found. Written for bash 3.2 (macOS) as well as newer bash.
 set -eu
@@ -39,7 +41,11 @@ case "$mode" in
         ;;
     linux)
         [ $# -eq 5 ] || fail "usage: check-min-os.sh linux <binary> <max GLIBC> <max GLIBCXX> <max CXXABI>"
-        symbols="$(objdump -T "$binary")" || fail "objdump -T failed for $binary"
+        info="$(readelf --version-info --wide "$binary")" || fail "readelf --version-info failed for $binary"
+        symbols="$(printf '%s\n' "$info" | sed -n '/Version needs section/,$p')"
+        [ -n "$symbols" ] || fail "$binary has no version needs section; is it a dynamic glibc executable?"
+        echo "$binary: version needs (readelf --version-info):"
+        printf '%s\n' "$symbols" | grep -E 'File:|Name:' | sed -E 's/^ *0x[0-9a-f]+: +//; s/^ *[0-9a-f]+: +//; s/ +Flags:.*//; s/ +Cnt:.*//; s/^/  /'
         status=0
         for pair in "GLIBC:$3" "GLIBCXX:$4" "CXXABI:$5"; do
             prefix="${pair%%:*}"; limit="${pair#*:}"

@@ -167,6 +167,86 @@ jobs:
             echo "::endgroup::"
           done
 
+  # The Windows IDE built as the release builds it, without publishing or
+  # uploading anything: the installer payload and the portable ZIP are
+  # verified for this commit, and the production bundle and the running IDE
+  # are checked for CDN code, the Content Security Policy and the IPC surface.
+  ide-windows:
+    name: Windows IDE build (not published)
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ide/package-lock.json
+      # Same pinned action and toolchain as release.yml.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.98.1
+      - name: Install OpenSSL
+        shell: pwsh
+        run: C:\vcpkg\vcpkg.exe install openssl:x64-windows
+      - name: Build the C++ backend
+        shell: pwsh
+        run: |
+          cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake"
+          cmake --build build --config Release --target arn arn_server_fixture --parallel
+      - name: Install frontend dependencies
+        working-directory: ide
+        run: npm ci
+      - name: Test Rust bridge
+        shell: pwsh
+        run: |
+          $env:ARN_TEST_BIN = (Resolve-Path build/Release/arn_server_fixture.exe).Path
+          cargo test --locked --manifest-path ide/src-tauri/Cargo.toml
+      - name: Build branded Windows installer
+        working-directory: ide
+        shell: pwsh
+        run: |
+          $env:ARN_BIN = (Resolve-Path ../build/Release/arn.exe).Path
+          $env:ARN_RUNTIME_DIR = 'C:\vcpkg\installed\x64-windows\bin'
+          npm run installer:build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify the installer payload and the portable ZIP (not published)
+        shell: pwsh
+        run: |
+          $version = (Get-Content ide/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $setup = @(Get-ChildItem 'ide/src-tauri/target/release/bundle/nsis' -Filter '*-setup.exe')
+          if ($setup.Count -ne 1) { throw 'Expected exactly one Windows installer' }
+          7z x $setup[0].FullName '-oide/src-tauri/target/installer-smoke' -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:ARN_EXPECTED_VERSION = $version
+          $env:ARN_EXPECTED_COMMIT = $env:GITHUB_SHA
+          node tests/installer_runtime_test.mjs ide/src-tauri/target/installer-smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/verify-ide-package.ps1 -Directory ide/src-tauri/target/installer-smoke `
+            -ExpectedVersion $version -ExpectedCommit $env:GITHUB_SHA
+          $package = "arn-ide-windows-x64"
+          New-Item -ItemType Directory -Force $package | Out-Null
+          Copy-Item "ide/src-tauri/target/release/arn-ide.exe" "$package/arn-ide.exe"
+          $runtime = 'ide/src-tauri/installer/runtime'
+          foreach ($file in (Get-Content "$runtime/manifest.json" -Raw | ConvertFrom-Json)) {
+            Copy-Item (Join-Path $runtime $file) $package
+          }
+          Copy-Item "LICENSE", "README.md" $package
+          Copy-Item "docs/ide-arn-bridge.md" "$package/IDE-README.md"
+          Compress-Archive -Path "$package/*" -DestinationPath "arn-ide-windows-x64.zip"
+          ./scripts/verify-ide-package.ps1 -ZipPath arn-ide-windows-x64.zip `
+            -ExpectedVersion $version -ExpectedCommit $env:GITHUB_SHA
+      - name: Check the production bundle and the running IDE
+        shell: pwsh
+        run: |
+          $env:ARN_IDE_DIST = 'ide/dist'
+          node --test tests/ide_security_test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/ide_runtime_test.mjs ide/src-tauri/target/release/arn-ide.exe com.arnecto.ide
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   # One Debug build with AddressSanitizer and UndefinedBehaviorSanitizer runs
   # every test, including the POSIX terminal UI on a real pseudo-terminal
   # (tests/posix_pty_test.sh, through tmux). Any sanitizer report stops the

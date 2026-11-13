@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
 import Editor from '@monaco-editor/react';
 import { AgentPanel } from './AgentPanel';
 
@@ -65,17 +64,21 @@ export default function App() {
 
   const selectProjectFolder = async () => {
     if (tabs.some(tab => tab.isDirty) && !confirm('Discard unsaved tabs and change project?')) return;
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: 'Select Project Folder',
-    });
+    // The folder dialog runs in the Rust backend, and only the folder the user
+    // picked there can be opened: the web page cannot name a project path.
+    let selected: string | null;
+    try {
+      selected = await invoke<string | null>('choose_project_folder');
+    } catch (error) {
+      setProjectError(String(error));
+      return;
+    }
 
     if (selected) {
-      const path = Array.isArray(selected) ? selected[0] : selected;
+      const path = selected;
       setSwitching(true); setProjectError('');
       try {
-        const canonical = await invoke<string>('set_project_root', { path });
+        const canonical = await invoke<string>('open_chosen_project');
         setProjectRoot(canonical);
       } catch (error) {
         setProjectError(String(error));
