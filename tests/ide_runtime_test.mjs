@@ -82,6 +82,36 @@ function environmentReport() {
   lines.push(`msedgewebview2.exe processes on this machine (any application): ${webviewProcesses}`);
   const webviewData = path.join(profile, 'EBWebView');
   lines.push(`WebView2 user data folder ${webviewData}: ${fs.existsSync(webviewData) ? 'created' : 'not created'}`);
+  const activePort = path.join(webviewData, 'DevToolsActivePort');
+  // Informational only: WebView2 does not always write this file, even when
+  // the port is open.
+  lines.push(`DevToolsActivePort file (informational): ${fs.existsSync(activePort) ? `present, port ${fs.readFileSync(activePort, 'utf8').split(/\r?\n/)[0]}` : 'absent'}`);
+  // The WebView2 processes of this profile: did they get the debugging flag,
+  // and what do they listen on? Only those flags and the ports are printed.
+  try {
+    const script = `$ErrorActionPreference='SilentlyContinue'; $d='${webviewData.toLowerCase().replace(/'/g, "''")}';` +
+      `$ps=@(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains($d) });` +
+      `$out=@($ps | ForEach-Object { $c=$_.CommandLine; [pscustomobject]@{ pid=$_.ProcessId;` +
+      ` type=([regex]::Match($c,'--type=([a-z-]+)').Groups[1].Value);` +
+      ` debug=([regex]::Match($c,'--remote-debugging-port=(\\d+)').Groups[1].Value);` +
+      ` listen=@(Get-NetTCPConnection -State Listen -OwningProcess $_.ProcessId | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" }) } });` +
+      `ConvertTo-Json -Compress -Depth 3 @($out)`;
+    const info = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30000 }) || '[]');
+    const processes = Array.isArray(info) ? info : [info];
+    lines.push(`WebView2 processes of this profile: ${processes.length}`);
+    for (const p of processes) {
+      lines.push(`  pid ${p.pid} ${p.type || 'browser'}: --remote-debugging-port ${p.debug ? `=${p.debug}` : 'absent'}; listening ${[].concat(p.listen || []).join(', ') || 'nothing'}`);
+    }
+  } catch (error) { lines.push(`WebView2 process inspection failed: ${error.code || error.status || 'error'}`); }
+  // Edge/WebView2 group policies that can affect debugging or arguments.
+  for (const key of ['HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2', 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge']) {
+    try {
+      const values = execFileSync('reg', ['query', key], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        .split(/\r?\n/).map(l => l.trim()).filter(l => /\sREG_/.test(l));
+      lines.push(`policy ${key}: ${values.length ? mask(values.slice(0, 15).join(' | ')) : 'no values'}`);
+    } catch { lines.push(`policy ${key}: not present`); }
+  }
   lines.push(`Windows ${os.release()} (${os.version()}), session ${process.env.SESSIONNAME || '(no SESSIONNAME)'}, ` +
     `GitHub Actions: ${process.env.GITHUB_ACTIONS === 'true' ? `yes, runner ${process.env.RUNNER_NAME || '?'} (${process.env.ImageOS || '?'} ${process.env.ImageVersion || ''})` : 'no'}`);
   return lines;
