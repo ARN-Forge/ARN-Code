@@ -1,0 +1,116 @@
+name: Compatibility diagnostics
+
+# Diagnostic only: builds arn on the release runners and reports the minimum
+# OS each binary needs (macOS LC_BUILD_VERSION minos; Linux GLIBC/GLIBCXX
+# symbol versions) and whether older deployment targets or distributions work.
+# It never publishes, uploads or tags anything.
+on:
+  push:
+    branches: [feature/release-integrity-stage-10]
+    paths: [.github/workflows/compat-diagnostics.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS ${{ matrix.arch }} deployment target
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+          - os: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install openssl@3 ninja
+
+      - name: Runner
+        run: |
+          sw_vers
+          xcodebuild -version
+          clang --version | head -n 1
+          xcrun --show-sdk-version
+
+      # The configuration release.yml uses today (no deployment target).
+      - name: Build as released and report
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" > /dev/null
+          cmake --build build --target arn --parallel > build.log 2>&1 || { tail -n 40 build.log; exit 1; }
+          echo "::group::otool -l (LC_BUILD_VERSION / LC_VERSION_MIN_MACOSX)"
+          otool -l build/arn | grep -A5 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+          echo "::endgroup::"
+          echo "arn:        $(vtool -show-build build/arn | tr '\n' ' ')"
+          for lib in libssl.3.dylib libcrypto.3.dylib; do
+            echo "$lib: $(vtool -show-build "$(brew --prefix openssl@3)/lib/$lib" | tr '\n' ' ')"
+          done
+          otool -L build/arn
+          ./build/arn --version
+
+      # Each candidate is built from scratch; an API the target does not offer
+      # fails the build (libc++ availability markup), so success is evidence.
+      - name: Try older deployment targets
+        run: |
+          for target in 11.0 12.0 13.0 14.0; do
+            dir="build-$target"
+            if cmake -S . -B "$dir" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                 -DCMAKE_OSX_DEPLOYMENT_TARGET="$target" \
+                 -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" > "$dir.configure.log" 2>&1 \
+               && cmake --build "$dir" --target arn --parallel > "$dir.build.log" 2>&1; then
+              minos="$(vtool -show-build "$dir/arn" | awk '/minos/ {print $2}')"
+              warnings="$(grep -c 'was built for newer' "$dir.build.log" || true)"
+              echo "target $target: BUILD OK, minos $minos, 'built for newer' linker warnings: $warnings, $("$dir/arn" --version)"
+              grep 'was built for newer' "$dir.build.log" | sort -u | head -n 5 | sed 's/^/    /'
+            else
+              echo "target $target: BUILD FAILED"
+              grep -E 'error:|unavailable|introduced in' "$dir.configure.log" "$dir.build.log" | sort -u | head -n 12 | sed 's/^/    /'
+            fi
+          done
+
+  linux:
+    name: Linux x64 glibc baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev ninja-build
+
+      - name: Runner
+        run: |
+          grep PRETTY_NAME /etc/os-release
+          ldd --version | head -n 1
+          gcc --version | head -n 1
+
+      - name: Build as released and report
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release > /dev/null
+          cmake --build build --target arn --parallel > build.log 2>&1 || { tail -n 40 build.log; exit 1; }
+          echo "NEEDED:"; readelf -d build/arn | grep NEEDED
+          for prefix in GLIBC GLIBCXX CXXABI GCC OPENSSL; do
+            echo "$prefix versions required: $(objdump -T build/arn | grep -oE "\b${prefix}_[0-9][0-9.]*" | sort -uV | tr '\n' ' ')"
+          done
+          echo "::group::readelf -V (version needs)"
+          readelf -V build/arn | sed -n '/.gnu.version_r/,$p'
+          echo "::endgroup::"
+          ./build/arn --version
+
+      # Runs the binary built on this runner on older distributions, with
+      # only the distribution's own OpenSSL 3 runtime added.
+      - name: Run the binary on other distributions
+        run: |
+          for image in ubuntu:22.04 ubuntu:24.04 debian:12 debian:13; do
+            out="$(docker run --rm -v "$PWD/build:/b:ro" "$image" sh -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq > /dev/null 2>&1
+              apt-get install -y -qq libssl3t64 > /dev/null 2>&1 || apt-get install -y -qq libssl3 > /dev/null 2>&1
+              echo "glibc $(ldd --version | head -n 1 | grep -oE "[0-9]+\.[0-9]+$")"
+              /b/arn --version' 2>&1 | tr '\n' ' ')"
+            echo "$image: $out"
+          done
