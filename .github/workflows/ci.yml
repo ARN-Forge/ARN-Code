@@ -238,13 +238,38 @@ jobs:
           Compress-Archive -Path "$package/*" -DestinationPath "arn-ide-windows-x64.zip"
           ./scripts/verify-ide-package.ps1 -ZipPath arn-ide-windows-x64.zip `
             -ExpectedVersion $version -ExpectedCommit $env:GITHUB_SHA
-      - name: Check the production bundle and the running IDE
+      - name: Check the production bundle
         shell: pwsh
         run: |
           $env:ARN_IDE_DIST = 'ide/dist'
           node --test tests/ide_security_test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node tests/ide_runtime_test.mjs ide/src-tauri/target/release/arn-ide.exe com.arnecto.ide
+      # The running IDE is tested on a test-only build: the production
+      # configuration plus a DevTools port in the window's browser arguments
+      # and its own identifier (tests/ide_e2e_config.mjs); the runner does not
+      # apply WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS. It is built after the
+      # production packages, which must still contain the production
+      # arn-ide.exe.
+      - name: Run the IDE end to end (test build with a DevTools port)
+        shell: pwsh
+        working-directory: ide/src-tauri
+        run: |
+          $production = (Get-FileHash target/release/arn-ide.exe -Algorithm SHA256).Hash
+          $env:TAURI_CONFIG = node ../../tests/ide_e2e_config.mjs 9333
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --locked --features custom-protocol
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item Env:TAURI_CONFIG
+          New-Item -ItemType Directory -Force target/e2e | Out-Null
+          Move-Item -Force target/release/arn-ide.exe target/e2e/arn-ide.exe
+          $e2e = (Get-FileHash target/e2e/arn-ide.exe -Algorithm SHA256).Hash
+          $installer = (Get-FileHash target/installer-smoke/arn-ide.exe -Algorithm SHA256).Hash
+          $portable = (Get-FileHash ../../arn-ide-windows-x64/arn-ide.exe -Algorithm SHA256).Hash
+          Write-Host "production arn-ide.exe $production; installer payload $installer; portable package $portable; test build $e2e"
+          if ($installer -ne $production -or $portable -ne $production) { throw 'The packages do not contain the production arn-ide.exe.' }
+          if ($e2e -eq $production) { throw 'The test build is identical to the production build.' }
+          $env:ARN_IDE_DEVTOOLS_PORT = '9333'
+          node ../../tests/ide_runtime_test.mjs target/e2e/arn-ide.exe com.arnecto.ide.e2etest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   # One Debug build with AddressSanitizer and UndefinedBehaviorSanitizer runs

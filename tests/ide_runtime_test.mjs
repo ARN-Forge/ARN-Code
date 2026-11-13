@@ -13,11 +13,17 @@
 // application does not expose it.
 //
 //   node tests/ide_runtime_test.mjs <arn-ide.exe> [<identifier>]
-// On a developer machine, build arn-ide.exe with
-// TAURI_CONFIG='{"identifier":"com.arnecto.ide.e2etest"}' (the default
-// <identifier>) so the test's WebView profile, %LOCALAPPDATA%\<identifier>,
-// is separate from a real installation. The test removes that folder
-// afterwards; on a CI runner the production identifier com.arnecto.ide is fine.
+// The DevTools port reaches WebView2 in one of two ways:
+//   - ARN_IDE_DEVTOOLS_PORT set: the test build has the port compiled in.
+//     Build it with TAURI_CONFIG from `node tests/ide_e2e_config.mjs <port>`
+//     (identifier com.arnecto.ide.e2etest, browser arguments with the port;
+//     everything else is the production configuration). The test then does
+//     not set any WebView2 environment variable.
+//   - otherwise: a random port, passed through the
+//     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS environment variable (works on a
+//     developer machine; GitHub's Windows runner did not apply it).
+// <identifier> (default com.arnecto.ide.e2etest) names the WebView profile,
+// %LOCALAPPDATA%\<identifier>, which the test removes afterwards.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -31,7 +37,9 @@ if (!fs.existsSync(exe)) throw new Error(`usage: node tests/ide_runtime_test.mjs
 const identifier = process.argv[3] || 'com.arnecto.ide.e2etest';
 if (!/^com\.arnecto\.ide(\.[a-z0-9]+)?$/.test(identifier)) throw new Error(`unexpected identifier '${identifier}'`);
 const profile = path.join(process.env.LOCALAPPDATA, identifier);
-const port = 9300 + Math.floor(Math.random() * 500);
+const fixedPort = process.env.ARN_IDE_DEVTOOLS_PORT;
+if (fixedPort && !/^\d{4,5}$/.test(fixedPort)) throw new Error(`ARN_IDE_DEVTOOLS_PORT must be a port number, got '${fixedPort}'`);
+const port = fixedPort ? Number(fixedPort) : 9300 + Math.floor(Math.random() * 500);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, detail = '') => { results.push({ name, ok, detail }); console.log(`${ok ? 'ok' : 'FAIL'}: ${name}${detail ? ` (${detail})` : ''}`); };
@@ -46,10 +54,11 @@ const mask = text => text
   .replace(/[A-Za-z0-9+/_-]{32,}={0,2}/g, '[masked]');
 let spawnError = null;
 let exited = null;
-const child = spawn(exe, [], {
-  env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` },
-  stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false,
-});
+const childEnv = { ...process.env };
+delete childEnv.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS;
+if (!fixedPort) childEnv.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = `--remote-debugging-port=${port}`;
+console.log(`DevTools port ${port}, passed ${fixedPort ? 'by the test build\'s Tauri configuration (no WebView2 environment variable)' : 'through WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'}`);
+const child = spawn(exe, [], { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false });
 child.on('error', error => { spawnError = error; });
 child.on('exit', (code, signal) => { exited = { code, signal }; });
 child.stdout.on('data', chunk => keep('stdout', chunk));
@@ -62,6 +71,27 @@ const tcpOpen = () => new Promise(resolve => {
   socket.once('connect', () => { socket.destroy(); resolve(true); });
   socket.once('error', () => resolve(false));
 });
+
+// The WebView2 processes of this test's profile: whether each got the
+// debugging flag, and which TCP ports it listens on. Only the process type,
+// the flag's value and the ports are printed, never a command line.
+function webviewProcessReport() {
+  const webviewData = path.join(profile, 'EBWebView');
+  try {
+    const script = `$ErrorActionPreference='SilentlyContinue'; $d='${webviewData.toLowerCase().replace(/'/g, "''")}';` +
+      `$ps=@(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains($d) });` +
+      `$out=@($ps | ForEach-Object { $c=$_.CommandLine; [pscustomobject]@{ pid=$_.ProcessId;` +
+      ` type=([regex]::Match($c,'--type=([a-z-]+)').Groups[1].Value);` +
+      ` debug=([regex]::Match($c,'--remote-debugging-port=(\\d+)').Groups[1].Value);` +
+      ` listen=@(Get-NetTCPConnection -State Listen -OwningProcess $_.ProcessId | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" }) } });` +
+      `ConvertTo-Json -Compress -Depth 3 @($out)`;
+    const info = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30000 }) || '[]');
+    const processes = Array.isArray(info) ? info : [info];
+    return [`WebView2 processes of this profile: ${processes.length}`, ...processes.map(p =>
+      `  pid ${p.pid} ${p.type || 'browser'}: --remote-debugging-port ${p.debug ? `=${p.debug}` : 'absent'}; listening ${[].concat(p.listen || []).join(', ') || 'nothing'}`)];
+  } catch (error) { return [`WebView2 process inspection failed: ${error.code || error.status || 'error'}`]; }
+}
 
 // Facts about the WebView2 Runtime and the runner, for a failed start.
 function environmentReport() {
@@ -86,24 +116,7 @@ function environmentReport() {
   // Informational only: WebView2 does not always write this file, even when
   // the port is open.
   lines.push(`DevToolsActivePort file (informational): ${fs.existsSync(activePort) ? `present, port ${fs.readFileSync(activePort, 'utf8').split(/\r?\n/)[0]}` : 'absent'}`);
-  // The WebView2 processes of this profile: did they get the debugging flag,
-  // and what do they listen on? Only those flags and the ports are printed.
-  try {
-    const script = `$ErrorActionPreference='SilentlyContinue'; $d='${webviewData.toLowerCase().replace(/'/g, "''")}';` +
-      `$ps=@(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains($d) });` +
-      `$out=@($ps | ForEach-Object { $c=$_.CommandLine; [pscustomobject]@{ pid=$_.ProcessId;` +
-      ` type=([regex]::Match($c,'--type=([a-z-]+)').Groups[1].Value);` +
-      ` debug=([regex]::Match($c,'--remote-debugging-port=(\\d+)').Groups[1].Value);` +
-      ` listen=@(Get-NetTCPConnection -State Listen -OwningProcess $_.ProcessId | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" }) } });` +
-      `ConvertTo-Json -Compress -Depth 3 @($out)`;
-    const info = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30000 }) || '[]');
-    const processes = Array.isArray(info) ? info : [info];
-    lines.push(`WebView2 processes of this profile: ${processes.length}`);
-    for (const p of processes) {
-      lines.push(`  pid ${p.pid} ${p.type || 'browser'}: --remote-debugging-port ${p.debug ? `=${p.debug}` : 'absent'}; listening ${[].concat(p.listen || []).join(', ') || 'nothing'}`);
-    }
-  } catch (error) { lines.push(`WebView2 process inspection failed: ${error.code || error.status || 'error'}`); }
+  lines.push(...webviewProcessReport());
   // Edge/WebView2 group policies that can affect debugging or arguments.
   for (const key of ['HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2', 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge']) {
     try {
@@ -158,6 +171,8 @@ try {
     }
   }
   assert.ok(target, 'the IDE page did not appear on the DevTools port within 60 s');
+  // Informational (not one of the checks): how the port reached WebView2.
+  for (const line of webviewProcessReport()) console.log(`info: ${line}`);
 
   socket = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
