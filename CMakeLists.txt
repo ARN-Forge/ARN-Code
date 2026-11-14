@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ArnAgentCode VERSION 0.9.0 LANGUAGES CXX)
+project(ArnAgentCode VERSION 0.9.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -119,22 +119,9 @@ add_dependencies(arn arn_build_info)
 target_link_libraries(arn PRIVATE arn::core nlohmann_json::nlohmann_json Threads::Threads)
 if (MSVC)
     target_compile_options(arn PRIVATE /utf-8)
-
-    # The Windows CLI package ships the Visual C++ runtime next to arn.exe
-    # (app-local deployment, scripts/package-windows.ps1). Its only source is
-    # Visual Studio's redistributable folder for this compiler
-    # (VC\Redist\MSVC\<version>\x64\Microsoft.VC14x.CRT), which CMake's
-    # InstallRequiredSystemLibraries locates; no install rules are added.
-    set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
-    set(CMAKE_INSTALL_UCRT_LIBRARIES FALSE)
-    set(CMAKE_INSTALL_DEBUG_LIBRARIES FALSE)
-    include(InstallRequiredSystemLibraries)
-    set(ARN_MSVC_RUNTIME_DIR "${MSVC_CRT_DIR}" CACHE INTERNAL
-        "Visual C++ redistributable CRT folder that the Windows CLI package uses")
-    if (NOT EXISTS "${MSVC_CRT_DIR}/vcruntime140.dll")
-        message(WARNING "Visual Studio's redistributable Visual C++ runtime was not found "
-                        "('${MSVC_CRT_DIR}'); scripts/package-windows.ps1 cannot package arn.exe.")
-    endif()
+    # The Microsoft Visual C++ runtime is not packaged with arn.exe: it is a
+    # prerequisite that users install from Microsoft (the Visual C++
+    # Redistributable), and scripts/install.ps1 checks for it.
 endif()
 
 if (BUILD_TESTING)

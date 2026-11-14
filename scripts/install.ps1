@@ -103,6 +103,34 @@ function Invoke-WithoutErrorDialogs([scriptblock]$Action) {
     try { & $Action } finally { [void][ArnInstaller.ErrorMode]::SetErrorMode($saved) }
 }
 
+# The Microsoft Visual C++ runtime is a prerequisite of arn.exe and of the
+# OpenSSL DLLs. ARN Code does not ship it, and this installer never downloads
+# or installs it: users install the Microsoft Visual C++ Redistributable from
+# Microsoft. The check only looks in System32, so it needs no administrator
+# rights (installing the Redistributable does).
+$vcRedistUrl = "https://aka.ms/vc14/vc_redist.x64.exe"
+$vcRuntimeDlls = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_atomic_wait.dll")
+function Get-MissingVcRuntime {
+    $system = Join-Path $env:SystemRoot "System32"
+    # A 32-bit PowerShell sees the 64-bit System32 as Sysnative.
+    $sysnative = Join-Path $env:SystemRoot "Sysnative"
+    if (-not [Environment]::Is64BitProcess -and (Test-Path -LiteralPath $sysnative)) { $system = $sysnative }
+    # Test hook, unset in normal use: the directory to look in instead.
+    if ($env:ARN_INSTALL_TEST_SYSTEM_DIR) { $system = $env:ARN_INSTALL_TEST_SYSTEM_DIR }
+    return @($vcRuntimeDlls | Where-Object { -not (Test-Path -LiteralPath (Join-Path $system $_) -PathType Leaf) })
+}
+function Get-VcRuntimeMessage([string]$Problem) {
+    return ("ARN Code needs the Microsoft Visual C++ Redistributable for x64 (Visual Studio 2017-2026), and $Problem.`n" +
+            "Install it from Microsoft: $vcRedistUrl (installing it needs administrator rights), then run this installer again.`n" +
+            "ARN Code was not installed.")
+}
+# Windows status codes of a process that could not load its DLLs:
+# STATUS_DLL_NOT_FOUND and STATUS_ENTRYPOINT_NOT_FOUND (a DLL that is too old).
+function Test-MissingDllStatus([int]$ExitCode) {
+    $status = [BitConverter]::ToUInt32([BitConverter]::GetBytes($ExitCode), 0)
+    return $status -eq 0xC0000135 -or $status -eq 0xC0000139
+}
+
 # Test hooks, unset in normal use. ARN_INSTALL_TEST_FAULT="<point>" makes that
 # step fail with an error; "kill:<point>" terminates the process there without
 # any cleanup, as a crash or power loss would.
@@ -929,6 +957,12 @@ if ($Uninstall) {
     return
 }
 
+# Before anything is looked up or downloaded.
+$missingRuntime = @(Get-MissingVcRuntime)
+if ($missingRuntime.Count) {
+    throw (Get-VcRuntimeMessage "it is not installed on this computer (System32 has no $($missingRuntime -join ', '))")
+}
+
 $currentVersion = Get-InstalledArnVersion
 try {
     New-Item -ItemType Directory -Path $temporaryDir, $extractDir -Force | Out-Null
@@ -1030,7 +1064,11 @@ try {
     }
 
     $version = Invoke-WithoutErrorDialogs { & $stagedExecutable --version }
-    if ($LASTEXITCODE -ne 0 -or $version -notmatch '^arn [0-9]+\.[0-9]+\.[0-9]+') {
+    $versionExit = $LASTEXITCODE
+    if ($versionExit -ne 0 -and (Test-MissingDllStatus $versionExit)) {
+        throw (Get-VcRuntimeMessage ("the downloaded arn.exe could not start (Windows status 0x{0:X8}: a DLL it needs is missing or too old); the installed Redistributable may be older than this ARN Code needs" -f [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$versionExit), 0)))
+    }
+    if ($versionExit -ne 0 -or $version -notmatch '^arn [0-9]+\.[0-9]+\.[0-9]+') {
         throw "The downloaded ARN executable failed its version check."
     }
     $versionText = @($version) -join "`n"

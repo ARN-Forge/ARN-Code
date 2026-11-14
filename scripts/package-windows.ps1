@@ -7,10 +7,9 @@ param(
     # "arn <ExpectedVersion> (<first 12 digits of ExpectedCommit>)".
     [string]$ExpectedVersion,
     [string]$ExpectedCommit,
-    # Visual Studio's redistributable CRT folder (...\VC\Redist\MSVC\<version>\x64\
-    # Microsoft.VC14x.CRT). Defaults to ARN_MSVC_RUNTIME_DIR, which CMake records
-    # for the compiler that built arn.exe.
-    [string]$RuntimeDir
+    # Passed to verify-windows-package.ps1: THIRD-PARTY-NOTICES.txt must name
+    # exactly the packaged OpenSSL version (release and CI packages).
+    [switch]$RequireNoticesMatch
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,17 +24,17 @@ $OutputDir = Get-FullPath $OutputDir
 $executable = Join-Path $BuildDir "arn.exe"
 if (-not (Test-Path -LiteralPath $executable)) { throw "arn.exe was not found in $BuildDir" }
 
-if (-not $RuntimeDir) { $RuntimeDir = Get-CMakeRuntimeDir (Split-Path -Parent $executable) }
-
 if (Test-Path -LiteralPath $OutputDir) { Remove-Item -LiteralPath $OutputDir -Recurse -Force }
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 Copy-Item -LiteralPath $executable -Destination (Join-Path $OutputDir "arn.exe")
 
 # The package holds exactly the DLLs arn.exe needs, found by following its
 # imports (and delay-loads) transitively:
-#   - the Visual C++ runtime comes only from Visual Studio's redistributable
-#     folder (app-local deployment), never from System32, and must be signed
-#     by Microsoft; debug runtimes are not in that folder and cannot ship;
+#   - the Microsoft Visual C++ runtime is NOT packaged: it is a prerequisite
+#     that users install from Microsoft (the Visual C++ Redistributable,
+#     https://aka.ms/vc14/vc_redist.x64.exe), and install.ps1 checks for it;
+#     a Debug build, which needs the debug runtime that no Redistributable
+#     installs, cannot be packaged;
 #   - other DLLs come from the build directory, where CMake deployed them
 #     (OpenSSL);
 #   - Windows components (System32) and API sets, including the Universal
@@ -49,15 +48,10 @@ while ($queue.Count) {
     foreach ($import in (Get-PeImports $file)) {
         if ((Test-ApiSet $import) -or $seen.ContainsKey($import)) { continue }
         $seen[$import] = $true
-        if (Test-VcRuntime $import) {
-            if (-not $RuntimeDir) {
-                throw "arn.exe needs the Visual C++ runtime ($import), but no redistributable folder is known. Configure with MSVC, or pass -RuntimeDir."
-            }
-            $source = Join-Path $RuntimeDir $import
-            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-                throw "$import is not in the Visual C++ redistributable folder $RuntimeDir (debug runtimes cannot be redistributed; package a Release build)."
-            }
-            Assert-MicrosoftSigned $source
+        if (Test-DebugVcRuntime $import) {
+            throw "$([IO.Path]::GetFileName($file)) imports $import, the debug Visual C++ runtime, which no Visual C++ Redistributable installs; package a Release build."
+        } elseif (Test-VcRuntime $import) {
+            continue
         } elseif (Test-Path -LiteralPath (Join-Path $BuildDir $import) -PathType Leaf) {
             $source = Join-Path $BuildDir $import
         } elseif (Test-Path -LiteralPath (Join-Path $system $import) -PathType Leaf) {
@@ -118,7 +112,7 @@ $verified = $false
 $oldPath = $env:Path
 try {
     if ($ArchivePath) {
-        $verifyArgs = @{ ArchivePath = $ArchivePath }
+        $verifyArgs = @{ ArchivePath = $ArchivePath; RequireNoticesMatch = $RequireNoticesMatch }
         if ($ExpectedVersion -or $ExpectedCommit) {
             $verifyArgs.ExpectedVersion = $ExpectedVersion
             $verifyArgs.ExpectedCommit = $ExpectedCommit

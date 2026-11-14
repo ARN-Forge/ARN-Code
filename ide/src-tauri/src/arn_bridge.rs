@@ -144,11 +144,16 @@ impl ArnBridge {
             .and_then(Result::ok)
             .is_none()
         {
+            let exit_code = bridge
+                .child
+                .lock()
+                .await
+                .try_wait()
+                .ok()
+                .flatten()
+                .and_then(|status| status.code());
             bridge.shutdown().await;
-            return Err(
-                "ARN did not provide protocol 2 ready event. Rebuild ARN and check runtime DLLs."
-                    .into(),
-            );
+            return Err(startup_error(exit_code));
         }
         Ok(bridge)
     }
@@ -234,6 +239,29 @@ impl ArnBridge {
             .await;
     }
 }
+/// Windows status codes of a process that could not load its DLLs: a DLL is
+/// missing, or too old to have a function the program needs.
+const STATUS_DLL_NOT_FOUND: u32 = 0xC000_0135;
+const STATUS_ENTRYPOINT_NOT_FOUND: u32 = 0xC000_0139;
+/// Microsoft's link to the latest Visual C++ Redistributable for x64. ARN
+/// does not ship the Visual C++ runtime; users install it from Microsoft.
+const VC_REDIST_URL: &str = "https://aka.ms/vc14/vc_redist.x64.exe";
+
+/// The error for an ARN that did not report ready; `exit_code` is its exit
+/// code if it has already ended. A DLL that could not be loaded (on Windows,
+/// usually the Microsoft Visual C++ runtime) gets a message that says what
+/// to install.
+fn startup_error(exit_code: Option<i32>) -> String {
+    match exit_code.map(|code| code as u32) {
+        Some(status @ (STATUS_DLL_NOT_FOUND | STATUS_ENTRYPOINT_NOT_FOUND)) => format!(
+            "ARN could not start: a DLL it needs is missing or too old (Windows status 0x{status:08X}). \
+             ARN needs the Microsoft Visual C++ Redistributable (x64): install it from {VC_REDIST_URL}, \
+             then reopen the project."
+        ),
+        _ => "ARN did not provide protocol 2 ready event. Rebuild ARN and check runtime DLLs.".into(),
+    }
+}
+
 fn resolve_binary(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("ARN_BIN") {
         return PathBuf::from(path)
@@ -271,6 +299,22 @@ fn resolve_binary(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn startup_error_names_the_visual_cpp_redistributable() {
+        let missing = startup_error(Some(STATUS_DLL_NOT_FOUND as i32));
+        assert!(missing.contains("0xC0000135"), "{missing}");
+        assert!(missing.contains(VC_REDIST_URL), "{missing}");
+        let too_old = startup_error(Some(STATUS_ENTRYPOINT_NOT_FOUND as i32));
+        assert!(
+            too_old.contains("0xC0000139") && too_old.contains(VC_REDIST_URL),
+            "{too_old}"
+        );
+        for other in [Some(1), Some(-1), None] {
+            let message = startup_error(other);
+            assert!(message.contains("protocol 2 ready event"), "{message}");
+            assert!(!message.contains(VC_REDIST_URL), "{message}");
+        }
+    }
     #[tokio::test]
     async fn transport_lifecycle_and_confirmation() {
         let binary = PathBuf::from(

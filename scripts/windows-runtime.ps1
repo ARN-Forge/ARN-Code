@@ -50,31 +50,41 @@ function Test-ApiSet([string]$Name) {
 }
 
 # The Visual C++ runtime family (vcruntime, msvcp and its dot libraries,
-# concrt, vccorlib, vcomp, vcamp, mfc). These are never part of Windows: they
-# must ship with the CLI, taken from the Visual Studio redistributable folder.
+# concrt, vccorlib, vcomp, vcamp, mfc). It is not part of Windows and ARN Code
+# does not ship it: it is a prerequisite that users install from Microsoft,
+# the Microsoft Visual C++ Redistributable ($VcRedistUrl).
 function Test-VcRuntime([string]$Name) {
     return $Name -match '^(vcruntime|msvcp|concrt|vccorlib|vcomp|vcamp|mfcm?)1[0-9]{2}'
 }
 
-# Throws unless the file has a valid Authenticode signature from Microsoft.
-function Assert-MicrosoftSigned([string]$Path) {
-    $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { "" }
-    if ($signature.Status -ne 'Valid' -or $subject -notmatch '(^|,\s*)O=Microsoft Corporation(,|$)') {
-        throw "$([IO.Path]::GetFileName($Path)) is not a file signed by Microsoft (signature $($signature.Status), signer '$subject')."
-    }
+# The debug Visual C++ runtime (vcruntime140d.dll, msvcp140d.dll, ...) and the
+# debug Universal CRT: no Redistributable installs them.
+function Test-DebugVcRuntime([string]$Name) {
+    return $Name -match '^((vcruntime|msvcp|concrt|vccorlib|vcomp|vcamp|mfcm?)1[0-9]{2}(_[0-9a-z_]+)?d|ucrtbased)\.dll$'
 }
 
-# Reads ARN_MSVC_RUNTIME_DIR, the Visual Studio redistributable CRT folder that
-# CMake found for the compiler, from the CMakeCache.txt of a build directory.
-function Get-CMakeRuntimeDir([string]$BuildDir) {
-    foreach ($candidate in @($BuildDir, (Split-Path -Parent $BuildDir))) {
-        $cache = Join-Path $candidate "CMakeCache.txt"
-        if (Test-Path -LiteralPath $cache) {
-            $line = Select-String -LiteralPath $cache -Pattern '^ARN_MSVC_RUNTIME_DIR:[A-Z]+=(.*)$' | Select-Object -First 1
-            if ($line) { return $line.Matches[0].Groups[1].Value.Trim() }
-            return ""
-        }
-    }
-    return ""
+# Microsoft's permanent link to the latest supported Visual C++ v14
+# Redistributable for x64 (Visual Studio 2017-2026):
+# https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
+$VcRedistUrl = "https://aka.ms/vc14/vc_redist.x64.exe"
+
+# True for the OpenSSL DLLs of a Windows build (libcrypto-3-x64.dll, libssl-4-x64.dll, ...).
+function Test-OpenSslDll([string]$Name) {
+    return $Name -match '^lib(crypto|ssl)-[0-9]+(-x64)?\.dll$'
+}
+
+# Compares the OpenSSL version that THIRD-PARTY-NOTICES.txt names with the
+# packaged OpenSSL DLLs. The notices reproduce the copyright notice and
+# license text of one exact OpenSSL release ("... of OpenSSL X.Y.Z"); a
+# build with another OpenSSL would ship notices for a different version.
+# Returns a description of the mismatch, or $null when they agree.
+function Get-OpenSslNoticesProblem([string]$NoticesPath, [string[]]$DllPaths) {
+    $text = [IO.File]::ReadAllText($NoticesPath)
+    $named = @([regex]::Matches($text, '\bOpenSSL ([0-9]+\.[0-9]+\.[0-9]+)\b') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    $packaged = @($DllPaths | ForEach-Object {
+        $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($_).ProductVersion
+        if ($version) { $version.Trim() } else { "(no version) $([IO.Path]::GetFileName($_))" }
+    } | Sort-Object -Unique)
+    if ($named.Count -eq 1 -and $packaged.Count -eq 1 -and $named[0] -eq $packaged[0]) { return $null }
+    return "THIRD-PARTY-NOTICES.txt names OpenSSL $(if ($named.Count) { $named -join ', ' } else { '(no X.Y.Z version)' }), but the packaged OpenSSL DLLs are version $($packaged -join ', ')"
 }

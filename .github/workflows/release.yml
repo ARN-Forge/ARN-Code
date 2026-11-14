@@ -176,7 +176,8 @@ jobs:
             -OutputDir arn-windows-x64 `
             -ArchivePath arn-windows-x64.zip `
             -ExpectedVersion ($env:REF_NAME.Substring(1)) `
-            -ExpectedCommit $env:GITHUB_SHA
+            -ExpectedCommit $env:GITHUB_SHA `
+            -RequireNoticesMatch
 
       # Archives exactly arn, LICENSE, README.md and THIRD-PARTY-NOTICES.txt,
       # checks the entries, runs the extracted arn with a minimal environment
@@ -266,7 +267,7 @@ jobs:
           node ../tests/installer_runtime_test.mjs src-tauri/target/installer-smoke
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ../scripts/verify-ide-package.ps1 -Directory src-tauri/target/installer-smoke `
-            -ExpectedVersion $env:ARN_EXPECTED_VERSION -ExpectedCommit $env:GITHUB_SHA
+            -ExpectedVersion $env:ARN_EXPECTED_VERSION -ExpectedCommit $env:GITHUB_SHA -RequireNoticesMatch
           # The production bundle: Monaco bundled, no CDN code, restrictive CSP.
           $env:ARN_IDE_DIST = 'dist'
           node --test ../tests/ide_security_test.mjs
@@ -287,7 +288,7 @@ jobs:
           Copy-Item "docs/ide-arn-bridge.md" "$package/IDE-README.md"
           Compress-Archive -Path "$package/*" -DestinationPath "arn-ide-windows-x64.zip"
           ./scripts/verify-ide-package.ps1 -ZipPath arn-ide-windows-x64.zip `
-            -ExpectedVersion ($env:REF_NAME.Substring(1)) -ExpectedCommit $env:GITHUB_SHA
+            -ExpectedVersion ($env:REF_NAME.Substring(1)) -ExpectedCommit $env:GITHUB_SHA -RequireNoticesMatch
           $installers = @(Get-ChildItem 'ide/src-tauri/target/release/bundle/nsis' -Filter '*-setup.exe')
           if ($installers.Count -ne 1) { throw 'Expected exactly one Windows installer' }
           Copy-Item $installers[0].FullName 'arn-ide-windows-x64-setup.exe'

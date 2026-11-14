@@ -68,5 +68,60 @@
       "note": "No license file in the package, in selectors/ or at the repository root at this commit. Its source files carry the MPL-2.0 Exhibit A notice (\"This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0 ...\"); the Cargo.toml declares MPL-2.0 and authors \"The Servo Project Developers\". The MPL-2.0 text reproduced for other crates applies; the source is listed in the MPL-2.0 section.",
       "files": []
     }
+  },
+  "components": {
+    "webview2-sdk": {
+      "name": "Microsoft WebView2 SDK",
+      "version": "1.0.3650.58",
+      "license": "see LICENSE.txt and NOTICE.txt of the SDK package",
+      "where": "WebView2LoaderStatic.lib linked statically into arn-ide.exe",
+      "source": "https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.3650.58",
+      "crateVersion": "0.38.2",
+      "x64LoaderSha256": "0659b741bde6348d4c4a6ec4ceb9af50e3d0048ed9cd3c8659bccbb61fde55ee",
+      "note": "webview2-com-sys 0.38.2 ships x64/WebView2LoaderStatic.lib byte for byte as build/native/x64/WebView2LoaderStatic.lib of this NuGet package; LICENSE.txt and NOTICE.txt are copied unchanged from the same package.",
+      "files": [
+        {
+          "path": "webview2-sdk-1.0.3650.58/LICENSE.txt",
+          "blob": "45f0297840dddc944f22507479d4df96154906d8"
+        },
+        {
+          "path": "webview2-sdk-1.0.3650.58/NOTICE.txt",
+          "blob": "bb64ba3bd97765174422b672d225205c5c70b488"
+        }
+      ]
+    },
+    "nsis": {
+      "name": "NSIS (Nullsoft Scriptable Install System)",
+      "version": "3.11",
+      "license": "zlib/libpng (the installer uses NSIS's zlib compression module; the LZMA and bzip2 modules, which COPYING also describes, are not included)",
+      "compression": "zlib",
+      "where": "installer stub and the plug-ins System, nsDialogs, StartMenu, LangDLL and NSISdl in arn-ide-windows-x64-setup.exe, and the uninstall.exe it installs",
+      "source": "https://github.com/nsis-dev/nsis/tree/v311; the Tauri CLI uses https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip (a copy of https://sourceforge.net/projects/nsis/files/NSIS%203/3.11/nsis-3.11.zip)",
+      "cliPattern": "nsis-([0-9][0-9.]*)/nsis-[0-9][0-9.]*\\.zip",
+      "files": [
+        {
+          "path": "nsis-3.11/COPYING",
+          "blob": "34ec9c5bb3c36604b2eebdf6bca62d2cd8b142dc"
+        }
+      ]
+    },
+    "nsis-tauri-utils": {
+      "name": "nsis_tauri_utils",
+      "version": "0.5.3",
+      "license": "MIT OR Apache-2.0",
+      "where": "NSIS plug-in in arn-ide-windows-x64-setup.exe and in the uninstall.exe it installs",
+      "source": "https://github.com/tauri-apps/nsis-tauri-utils/tree/nsis_tauri_utils-v0.5.3",
+      "cliPattern": "nsis_tauri_utils-v([0-9][0-9.]*[0-9])",
+      "files": [
+        {
+          "path": "nsis-tauri-utils-0.5.3/LICENSE_MIT",
+          "blob": "7e54d8e4c28e943a545c1bef79f8dfdb2a2affe2"
+        },
+        {
+          "path": "nsis-tauri-utils-0.5.3/LICENSE_APACHE-2.0",
+          "blob": "f433b1a53f5b830a205fd2df78e2b34974656c7b"
+        }
+      ]
+    }
   }
 }
