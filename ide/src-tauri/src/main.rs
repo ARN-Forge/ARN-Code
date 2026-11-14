@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 mod arn_bridge;
 use arn_bridge::ArnBridge;
@@ -26,17 +27,47 @@ pub struct FileContent {
 
 pub struct AppState {
     project_root: Mutex<Option<PathBuf>>,
+    // The folder the user last picked in the backend's own dialog; only it can
+    // become the project root (the web page never supplies a path).
+    chosen_root: Mutex<Option<PathBuf>>,
     bridge: tokio::sync::Mutex<Option<Arc<ArnBridge>>>,
     agent_busy: AtomicBool,
 }
 
+// Shows the native folder dialog from the backend and remembers the pick.
+// Returns the folder for display, or None if the user cancelled.
 #[tauri::command]
-async fn set_project_root(
+async fn choose_project_folder(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
-    path: String,
+) -> Result<Option<String>, String> {
+    // Async commands run off the main thread, where the blocking dialog is allowed.
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .set_title("Select Project Folder")
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
+    };
+    let path = picked
+        .into_path()
+        .map_err(|e| format!("Cannot open project: {e}"))?;
+    let shown = path.to_string_lossy().to_string();
+    *state.chosen_root.lock().unwrap() = Some(path);
+    Ok(Some(shown))
+}
+
+// Opens the folder picked by choose_project_folder as the project root. There
+// is deliberately no command that takes a path from the web page.
+#[tauri::command]
+async fn open_chosen_project(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<String, String> {
-    let root = PathBuf::from(path)
+    let chosen = state.chosen_root.lock().unwrap().take();
+    let path = chosen.ok_or("Choose a project folder first")?;
+    let root = path
         .canonicalize()
         .map_err(|e| format!("Cannot open project: {e}"))?;
     if !root.is_dir() {
@@ -340,11 +371,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             project_root: Mutex::new(None),
+            chosen_root: Mutex::new(None),
             bridge: tokio::sync::Mutex::new(None),
             agent_busy: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
-            set_project_root,
+            choose_project_folder,
+            open_chosen_project,
             get_project_root,
             list_files,
             read_file,

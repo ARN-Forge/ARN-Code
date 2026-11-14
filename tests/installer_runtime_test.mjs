@@ -21,7 +21,21 @@ function run(args, input) {
 }
 test('deployed backend loads with only Windows on PATH', () => {
   const version = JSON.parse(readFileSync(path.join(root, 'ide/src-tauri/tauri.conf.json'))).version;
-  assert.equal(run(['--version']).trim(), `arn ${version}`);
+  const expectedVersion = process.env.ARN_EXPECTED_VERSION;
+  const expectedCommit = process.env.ARN_EXPECTED_COMMIT;
+  assert.equal(Boolean(expectedVersion), Boolean(expectedCommit),
+    'Set both ARN_EXPECTED_VERSION and ARN_EXPECTED_COMMIT, or neither');
+  if (expectedVersion) {
+    // Release builds: exactly the tag's version and commit, never -dirty or unknown.
+    assert.match(expectedCommit, /^[0-9a-fA-F]{12,40}$/, 'ARN_EXPECTED_COMMIT must be 12-40 hex digits');
+    assert.equal(expectedVersion, version, 'ARN_EXPECTED_VERSION differs from the IDE version in tauri.conf.json');
+    assert.equal(run(['--version']).trim(), `arn ${expectedVersion} (${expectedCommit.slice(0, 12).toLowerCase()})`);
+  } else {
+    // Local builds may be uncommitted or built outside Git.
+    const escaped = version.replaceAll('.', '\\.');
+    assert.match(run(['--version']).trim(),
+      new RegExp(`^arn ${escaped} \\(([0-9a-f]{12}(-dirty)?|unknown)\\)$`));
+  }
 });
 test('deployed server starts in a separate project and handles EOF', () => {
   const messages = run(['--server'], '').trim().split(/\r?\n/).map(s => JSON.parse(s));

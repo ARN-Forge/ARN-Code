@@ -1,0 +1,180 @@
+name: Compatibility diagnostics
+
+# Diagnostic only: builds arn on the release runners and reports the minimum
+# OS each binary needs (macOS LC_BUILD_VERSION minos; Linux GLIBC/GLIBCXX
+# symbol versions) and whether older deployment targets or distributions work.
+# It never publishes a release, uploads release assets or tags anything; the
+# macOS 15 job passes the archive between two jobs as a workflow artifact
+# that is kept for one day.
+on:
+  push:
+    branches: [feature/release-integrity-stage-10]
+    paths: [.github/workflows/compat-diagnostics.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS ${{ matrix.arch }} deployment target
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+          - os: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install dependencies
+        run: brew install openssl@3 ninja
+
+      - name: Runner
+        run: |
+          sw_vers
+          xcodebuild -version
+          clang --version | head -n 1
+          xcrun --show-sdk-version
+
+      # The configuration release.yml uses today (no deployment target).
+      - name: Build as released and report
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" > /dev/null
+          cmake --build build --target arn --parallel > build.log 2>&1 || { tail -n 40 build.log; exit 1; }
+          echo "::group::otool -l (LC_BUILD_VERSION / LC_VERSION_MIN_MACOSX)"
+          otool -l build/arn | grep -A5 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX'
+          echo "::endgroup::"
+          echo "arn:        $(vtool -show-build build/arn | tr '\n' ' ')"
+          for lib in libssl.3.dylib libcrypto.3.dylib; do
+            echo "$lib: $(vtool -show-build "$(brew --prefix openssl@3)/lib/$lib" | tr '\n' ' ')"
+          done
+          otool -L build/arn
+          ./build/arn --version
+
+      # Each candidate is built from scratch; an API the target does not offer
+      # fails the build (libc++ availability markup), so success is evidence.
+      - name: Try older deployment targets
+        run: |
+          for target in 11.0 12.0 13.0 14.0; do
+            dir="build-$target"
+            if cmake -S . -B "$dir" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                 -DCMAKE_OSX_DEPLOYMENT_TARGET="$target" \
+                 -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" > "$dir.configure.log" 2>&1 \
+               && cmake --build "$dir" --target arn --parallel > "$dir.build.log" 2>&1; then
+              minos="$(vtool -show-build "$dir/arn" | awk '/minos/ {print $2}')"
+              warnings="$(grep -c 'was built for newer' "$dir.build.log" || true)"
+              echo "target $target: BUILD OK, minos $minos, 'built for newer' linker warnings: $warnings, $("$dir/arn" --version)"
+              grep 'was built for newer' "$dir.build.log" | sort -u | head -n 5 | sed 's/^/    /'
+            else
+              echo "target $target: BUILD FAILED"
+              grep -E 'error:|unavailable|introduced in' "$dir.configure.log" "$dir.build.log" | sort -u | head -n 12 | sed 's/^/    /'
+            fi
+          done
+
+  linux:
+    name: Linux x64 glibc baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev ninja-build
+
+      - name: Runner
+        run: |
+          grep PRETTY_NAME /etc/os-release
+          ldd --version | head -n 1
+          gcc --version | head -n 1
+
+      - name: Build as released and report
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release > /dev/null
+          cmake --build build --target arn --parallel > build.log 2>&1 || { tail -n 40 build.log; exit 1; }
+          echo "NEEDED:"; readelf -d build/arn | grep NEEDED
+          for prefix in GLIBC GLIBCXX CXXABI GCC OPENSSL; do
+            echo "$prefix versions required: $(objdump -T build/arn | grep -oE "\b${prefix}_[0-9][0-9.]*" | sort -uV | tr '\n' ' ')"
+          done
+          echo "::group::readelf -V (version needs)"
+          readelf -V build/arn | sed -n '/.gnu.version_r/,$p'
+          echo "::endgroup::"
+          ./build/arn --version
+
+      # Runs the binary built on this runner on older distributions, with
+      # only the distribution's own OpenSSL 3 runtime added.
+      - name: Run the binary on other distributions
+        run: |
+          for image in ubuntu:22.04 ubuntu:24.04 debian:12 debian:13; do
+            out="$(docker run --rm -v "$PWD/build:/b:ro" "$image" sh -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq > /dev/null 2>&1
+              apt-get install -y -qq libssl3t64 > /dev/null 2>&1 || apt-get install -y -qq libssl3 > /dev/null 2>&1
+              echo "glibc $(ldd --version | head -n 1 | grep -oE "[0-9]+\.[0-9]+$")"
+              /b/arn --version' 2>&1 | tr '\n' ' ')"
+            echo "$image: $out"
+          done
+
+  # The arm64 archive as release.yml builds it (macos-latest, deployment
+  # target 15.0), run on a macOS 15 arm64 runner: the oldest macOS the release
+  # declares. Homebrew's openssl@3 there is the one a macOS 15 user installs.
+  macos15-build:
+    name: macOS arm64 archive for the macOS 15 run
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install dependencies
+        run: brew install openssl@3 ninja
+      - name: Build and package as release.yml does
+        run: |
+          version="$(sed -n 's/^project(ArnAgentCode VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" > /dev/null
+          cmake --build build --target arn --parallel > build.log 2>&1 || { tail -n 40 build.log; exit 1; }
+          bash scripts/check-min-os.sh macos build/arn 15.0
+          bash scripts/package-unix.sh package --binary build/arn --name arn-macos-arm64 \
+            --archive arn-macos-arm64.tar.gz --version "$version" --commit "$GITHUB_SHA"
+          echo "$version" > version.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos15-arm64-archive
+          path: |
+            arn-macos-arm64.tar.gz
+            version.txt
+          retention-days: 1
+          if-no-files-found: error
+
+  macos15-run:
+    name: macOS 15 arm64 runtime check
+    needs: macos15-build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: macos15-arm64-archive
+      - name: Machine
+        run: |
+          sw_vers
+          uname -m
+          sysctl -n machdep.cpu.brand_string hw.model || true
+      - name: Install Homebrew openssl@3 as a user would
+        run: brew install openssl@3
+      - name: Verify and run the archive
+        run: |
+          bash scripts/package-unix.sh verify --archive arn-macos-arm64.tar.gz --name arn-macos-arm64 \
+            --version "$(cat version.txt)" --commit "$GITHUB_SHA"
+          mkdir run && tar -xzf arn-macos-arm64.tar.gz -C run
+          arn=run/arn-macos-arm64/arn
+          echo "arn: $(vtool -show-build "$arn" | tr '\n' ' ')"
+          otool -L "$arn"
+          "$arn" --version
+          "$arn" --help > help.txt && head -n 5 help.txt
+          # Server mode answers with a "ready" message and ends at end of input.
+          mkdir project
+          out="$(cd project && "$PWD/../$arn" --server < /dev/null)"
+          echo "$out" | head -n 3
+          echo "$out" | grep -q '"type":"ready"' || { echo "::error::arn --server did not report ready"; exit 1; }
+          [ -z "$(ls -A project)" ] || { echo "::error::server mode created files in the project"; exit 1; }

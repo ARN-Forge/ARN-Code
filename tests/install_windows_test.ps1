@@ -13,6 +13,14 @@ function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
+# A Debug arn.exe needs the debug Visual C++ runtime, which cannot be
+# redistributed, so it cannot be packaged: skip (CTest SKIP_RETURN_CODE 77).
+. (Join-Path $repo "scripts/windows-runtime.ps1")
+if (@(Get-PeImports (Join-Path $BuildDir "arn.exe") | Where-Object { $_ -match '^(vcruntime140(_1)?d|msvcp140d)' }).Count) {
+    Write-Host "skip: arn.exe is a Debug build; its debug Visual C++ runtime cannot be redistributed"
+    exit 77
+}
+
 try {
     New-Item -ItemType Directory -Path $root, $projectDir -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $projectDir "README.md") -Value "# Installer workspace"
@@ -21,26 +29,31 @@ try {
     & (Join-Path $repo "scripts/package-windows.ps1") `
         -BuildDir $BuildDir -OutputDir $packageDir -ArchivePath $archive
     Assert-True ($LASTEXITCODE -eq 0) "Windows package creation failed."
+    # The installer verifies a local archive against a SHA256SUMS as well.
+    $checksums = Join-Path $root "SHA256SUMS"
+    [IO.File]::WriteAllText($checksums,
+        "$((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant())  arn-windows-x64.zip`n")
 
     $oldPath = $env:Path
     try {
         $env:Path = Join-Path $env:SystemRoot "System32"
         & (Join-Path $repo "scripts/install.ps1") `
-            -InstallDir $installDir -ArchivePath $archive -PathScope Process
+            -InstallDir $installDir -ArchivePath $archive -ChecksumsPath $checksums -PathScope Process
         Assert-True ($LASTEXITCODE -eq 0) "First local installation failed."
         Assert-True ((Get-Command arn -ErrorAction SilentlyContinue).Source -eq
                      (Join-Path $installDir "arn.exe")) "Installed arn was not found through PATH."
 
         Set-Content -LiteralPath (Join-Path $installDir "unrelated.txt") -Value "preserve me"
         & (Join-Path $repo "scripts/install.ps1") `
-            -InstallDir $installDir -ArchivePath $archive -PathScope Process
+            -InstallDir $installDir -ArchivePath $archive -ChecksumsPath $checksums -PathScope Process
         Assert-True (Test-Path -LiteralPath (Join-Path $installDir "unrelated.txt")) `
             "A repeated install removed an unrelated file."
 
         Push-Location $projectDir
         try {
             $version = & arn --version
-            Assert-True ($LASTEXITCODE -eq 0 -and $version -match '^arn [0-9]+\.[0-9]+\.[0-9]+$') `
+            Assert-True ($LASTEXITCODE -eq 0 -and
+                         $version -match '^arn [0-9]+\.[0-9]+\.[0-9]+ \(([0-9a-f]{12}(-dirty)?|unknown)\)$') `
                 "Installed command failed from an unrelated project directory."
             $server = New-Object Diagnostics.Process
             $server.StartInfo = New-Object Diagnostics.ProcessStartInfo

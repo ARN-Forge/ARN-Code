@@ -1,10 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions for ARN IDE",
+  "description": "Default permissions for ARN IDE: only event listening. The folder dialog runs in the backend (choose_project_folder), so the page has no dialog permission.",
   "windows": [ "main" ],
   "permissions": [
-    "core:default",
-    "dialog:allow-open"
+    "core:event:default"
   ]
 }

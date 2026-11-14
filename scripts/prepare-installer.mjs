@@ -86,6 +86,18 @@ for (const [name, source] of files) {
   fs.copyFileSync(source, path.join(stage, name));
   resources[`installer/runtime/${name}`] = name;
 }
+// Third-party notices ship next to arn-ide.exe in the installer and the
+// portable ZIP: the CLI's (arn.exe, OpenSSL, Visual C++ runtime) and the
+// IDE's own, generated from the license files of the exact Rust crates and
+// npm packages in use. A component without a license file, in its package or
+// in ide/third-party-licenses/sources.json, stops the build.
+fs.copyFileSync(path.join(root, 'THIRD-PARTY-NOTICES.txt'), path.join(stage, 'THIRD-PARTY-NOTICES.txt'));
+execFileSync(process.execPath, [path.join(root, 'scripts/generate-ide-notices.mjs'),
+  path.join(stage, 'THIRD-PARTY-NOTICES-IDE.txt')], { stdio: 'inherit' });
+for (const name of ['THIRD-PARTY-NOTICES.txt', 'THIRD-PARTY-NOTICES-IDE.txt']) {
+  files.set(name, path.join(stage, name));
+  resources[`installer/runtime/${name}`] = name;
+}
 fs.writeFileSync(path.join(stage, 'bundle-resources.json'), JSON.stringify({ bundle: { resources } }, null, 2) + '\n');
 fs.writeFileSync(path.join(stage, 'manifest.json'), JSON.stringify([...files.keys()].sort(), null, 2) + '\n');
 console.log(`Staged ${files.size} runtime files: ${[...files.keys()].join(', ')}`);
