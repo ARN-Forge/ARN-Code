@@ -42,7 +42,9 @@ LangString ArnVcRuntimeOpen 1058 "Відкрити це посилання в б
     ${If} $R9 != ""
       ; Tauri's Install section has made $INSTDIR the working directory; leave
       ; it, then remove it only if it is empty (it was created just now).
-      SetOutPath "$TEMP"
+      ; SetCurrentDirectoryW, not SetOutPath: 7-Zip reads the script in order
+      ; and would take a SetOutPath here as the folder of the files after it.
+      System::Call 'kernel32::SetCurrentDirectoryW(w "$TEMP")'
       RMDir "$INSTDIR"
       ${If} ${Silent}
         System::Call 'kernel32::AttachConsole(i -1)i.r0'
