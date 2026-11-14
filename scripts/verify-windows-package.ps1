@@ -2,7 +2,12 @@
 param(
     [Parameter(Mandatory = $true)][string]$ArchivePath,
     [string]$ExpectedVersion,
-    [string]$ExpectedCommit
+    [string]$ExpectedCommit,
+    # Fail unless THIRD-PARTY-NOTICES.txt names exactly the OpenSSL version
+    # of the packaged OpenSSL DLLs (release and CI packages). Without it a
+    # mismatch is only reported, so that builds with a local OpenSSL can run
+    # the tests.
+    [switch]$RequireNoticesMatch
 )
 
 # Verifies the Windows CLI ZIP:
@@ -15,6 +20,8 @@ param(
 #     set (the Universal CRT is part of Windows 10 and later); the Visual C++
 #     runtime must be packaged, and its packaged files must be signed by
 #     Microsoft;
+#   - THIRD-PARTY-NOTICES.txt names the version of the packaged OpenSSL DLLs
+#     (enforced with -RequireNoticesMatch, otherwise a warning);
 #   - the archive extracted into a fresh temporary directory runs, with only
 #     System32 on PATH: `arn.exe --version` prints exactly
 #     "arn <ExpectedVersion> (<first 12 digits of ExpectedCommit>)", or any
@@ -121,6 +128,13 @@ try {
         $path = Join-Path $extractDir $packagedDlls[$dll]
         Assert-MicrosoftSigned $path
         Write-Host ("  {0} {1}, signed by Microsoft" -f $packagedDlls[$dll], (Get-Item -LiteralPath $path).VersionInfo.FileVersion)
+    }
+    $openSsl = @($packagedDlls.Keys | Where-Object { Test-OpenSslDll $_ } | ForEach-Object { Join-Path $extractDir $packagedDlls[$_] })
+    if ($openSsl.Count) {
+        $noticesProblem = Get-OpenSslNoticesProblem (Join-Path $extractDir "THIRD-PARTY-NOTICES.txt") $openSsl
+        if ($noticesProblem -and $RequireNoticesMatch) { throw "$noticesProblem." }
+        if ($noticesProblem) { Write-Warning "$noticesProblem; a release package must not be built this way." }
+        else { Write-Host "  THIRD-PARTY-NOTICES.txt names the packaged OpenSSL version" }
     }
 
     # 4. Run the extracted executable with only Windows on PATH.

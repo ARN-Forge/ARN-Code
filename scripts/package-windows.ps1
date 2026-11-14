@@ -10,7 +10,10 @@ param(
     # Visual Studio's redistributable CRT folder (...\VC\Redist\MSVC\<version>\x64\
     # Microsoft.VC14x.CRT). Defaults to ARN_MSVC_RUNTIME_DIR, which CMake records
     # for the compiler that built arn.exe.
-    [string]$RuntimeDir
+    [string]$RuntimeDir,
+    # Passed to verify-windows-package.ps1: THIRD-PARTY-NOTICES.txt must name
+    # exactly the packaged OpenSSL version (release and CI packages).
+    [switch]$RequireNoticesMatch
 )
 
 $ErrorActionPreference = "Stop"
@@ -118,7 +121,7 @@ $verified = $false
 $oldPath = $env:Path
 try {
     if ($ArchivePath) {
-        $verifyArgs = @{ ArchivePath = $ArchivePath }
+        $verifyArgs = @{ ArchivePath = $ArchivePath; RequireNoticesMatch = $RequireNoticesMatch }
         if ($ExpectedVersion -or $ExpectedCommit) {
             $verifyArgs.ExpectedVersion = $ExpectedVersion
             $verifyArgs.ExpectedCommit = $ExpectedCommit

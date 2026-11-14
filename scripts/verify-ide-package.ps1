@@ -3,7 +3,10 @@ param(
     [string]$ZipPath,
     [string]$Directory,
     [Parameter(Mandatory = $true)][string]$ExpectedVersion,
-    [Parameter(Mandatory = $true)][string]$ExpectedCommit
+    [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+    # Fail unless THIRD-PARTY-NOTICES.txt names exactly the OpenSSL version of
+    # the packaged OpenSSL DLLs (release and CI packages); otherwise a warning.
+    [switch]$RequireNoticesMatch
 )
 
 # Verifies the Windows IDE packages before they are published:
@@ -21,6 +24,8 @@ param(
 #     packaged DLL, is packaged, a Windows component in System32, or an API
 #     set; the Visual C++ runtime must be packaged and signed by Microsoft;
 #     no packaged DLL is unused;
+#   - THIRD-PARTY-NOTICES.txt names the version of the packaged OpenSSL DLLs
+#     (enforced with -RequireNoticesMatch, otherwise a warning);
 #   - arn.exe --version, run with only System32 on PATH, prints exactly
 #     "arn <ExpectedVersion> (<first 12 digits of ExpectedCommit>)", so a
 #     "-dirty" or "unknown" build is rejected;
@@ -118,6 +123,12 @@ try {
     $unneeded = @($packagedDlls.Keys | Where-Object { -not $needed.ContainsKey($_) } | ForEach-Object { $packagedDlls[$_] })
     if ($unneeded.Count) { throw "Packaged DLLs that neither arn.exe nor arn-ide.exe uses: $($unneeded -join ', ')." }
     foreach ($dll in @($packagedDlls.Keys | Where-Object { Test-VcRuntime $_ })) { Assert-MicrosoftSigned (Join-Path $root $packagedDlls[$dll]) }
+    $openSsl = @($packagedDlls.Keys | Where-Object { Test-OpenSslDll $_ } | ForEach-Object { Join-Path $root $packagedDlls[$_] })
+    if ($openSsl.Count) {
+        $noticesProblem = Get-OpenSslNoticesProblem (Join-Path $root "THIRD-PARTY-NOTICES.txt") $openSsl
+        if ($noticesProblem -and $RequireNoticesMatch) { throw "$noticesProblem." }
+        if ($noticesProblem) { Write-Warning "$noticesProblem; a release package must not be built this way." }
+    }
 
     # The bundled CLI: exact version and commit, with only Windows on PATH.
     $env:Path = $system

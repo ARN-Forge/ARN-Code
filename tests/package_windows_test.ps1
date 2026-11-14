@@ -190,6 +190,32 @@ try {
     Test-Verify "commit without version" $packageZip $false @("Pass both -ExpectedVersion and -ExpectedCommit") `
         @('-ExpectedCommit', 'ffffffffffffffffffffffffffffffffffffffff')
 
+    # THIRD-PARTY-NOTICES.txt must name the packaged OpenSSL version. The
+    # repository's notices describe the release build's OpenSSL, which a local
+    # build may not use, so the cases below rewrite the version they name.
+    $openSslVersion = (Get-Item -LiteralPath (Join-Path $packageDir $cryptoDll)).VersionInfo.ProductVersion.Trim()
+    $noticesText = [IO.File]::ReadAllText((Join-Path $packageDir 'THIRD-PARTY-NOTICES.txt'))
+    function New-NoticesZip([string]$Name, [string]$Version) {
+        $notices = Join-Path $root "$Name-THIRD-PARTY-NOTICES.txt"
+        [IO.File]::WriteAllText($notices, [regex]::Replace($noticesText, '\bOpenSSL [0-9]+\.[0-9]+\.[0-9]+\b', "OpenSSL $Version"))
+        $zip = Join-Path $root "$Name.zip"
+        New-Zip $zip @($standard | ForEach-Object { if ($_[0] -eq 'THIRD-PARTY-NOTICES.txt') { , @($_[0], $notices) } else { , $_ } })
+        return $zip
+    }
+    $matchingZip = New-NoticesZip "notices-matching" $openSslVersion
+    Test-Verify "notices naming the packaged OpenSSL version" $matchingZip $true `
+        @("THIRD-PARTY-NOTICES.txt names the packaged OpenSSL version") @('-RequireNoticesMatch')
+    $otherZip = New-NoticesZip "notices-other-version" "9.8.7"
+    Test-Verify "notices naming another OpenSSL version" $otherZip $false `
+        @("THIRD-PARTY-NOTICES.txt names OpenSSL 9.8.7, but the packaged OpenSSL DLLs are version $openSslVersion") @('-RequireNoticesMatch')
+    Test-Verify "another OpenSSL version without -RequireNoticesMatch only warns" $otherZip $true `
+        @("a release package must not be built this way")
+    $twoVersions = Join-Path $root "notices-two-versions-THIRD-PARTY-NOTICES.txt"
+    [IO.File]::WriteAllText($twoVersions, $noticesText + "`nOpenSSL $openSslVersion`nOpenSSL 9.8.7`n")
+    $twoZip = Join-Path $root "notices-two-versions.zip"
+    New-Zip $twoZip @($standard | ForEach-Object { if ($_[0] -eq 'THIRD-PARTY-NOTICES.txt') { , @($_[0], $twoVersions) } else { , $_ } })
+    Test-Verify "notices naming two OpenSSL versions" $twoZip $false @("but the packaged OpenSSL DLLs are version") @('-RequireNoticesMatch')
+
     # Relative paths follow the PowerShell location, not the process directory.
     $script:cases++
     $relativeDir = Join-Path $root "relative"

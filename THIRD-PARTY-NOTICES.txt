@@ -50,8 +50,15 @@ licensed under the MIT License above unless noted otherwise:
   Copyright (c) 2008-2009 Bjoern Hoehrmann <bjoern@hoehrmann.de>;
 - a slightly modified version of the Grisu2 algorithm from Florian Loitsch,
   Copyright (c) 2009 Florian Loitsch <https://florian.loitsch.com/>;
-- code marked "SPDX-FileCopyrightText: 2018 The Abseil Authors" with
-  "SPDX-License-Identifier: MIT" (include/nlohmann/detail/meta/cpp_future.hpp);
+- code taken from Google Abseil (absl/utility/utility.h at commit
+  10cb35e459f5ecca5b2ff107635da0bfa41011b4), in
+  include/nlohmann/detail/meta/cpp_future.hpp. The original file reads
+  "Copyright 2017 The Abseil Authors." and "Licensed under the Apache
+  License, Version 2.0"; the comment in cpp_future.hpp and the nlohmann/json
+  README also say it is licensed under the Apache License 2.0, while the
+  file's SPDX header reads "SPDX-FileCopyrightText: 2018 The Abseil Authors"
+  and "SPDX-License-Identifier: MIT". The Apache License 2.0 text is
+  reproduced in section 4;
 - Hedley from Evan Nemerson, Copyright 2016-2021 Evan Nemerson
   <evan@nemerson.com>, which the nlohmann/json README states is licensed as
   CC0-1.0 (its file header in this version reads "SPDX-License-Identifier: MIT").

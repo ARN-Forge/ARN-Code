@@ -65,6 +65,27 @@ function Assert-MicrosoftSigned([string]$Path) {
     }
 }
 
+# True for the OpenSSL DLLs of a Windows build (libcrypto-3-x64.dll, libssl-4-x64.dll, ...).
+function Test-OpenSslDll([string]$Name) {
+    return $Name -match '^lib(crypto|ssl)-[0-9]+(-x64)?\.dll$'
+}
+
+# Compares the OpenSSL version that THIRD-PARTY-NOTICES.txt names with the
+# packaged OpenSSL DLLs. The notices reproduce the copyright notice and
+# license text of one exact OpenSSL release ("... of OpenSSL X.Y.Z"); a
+# build with another OpenSSL would ship notices for a different version.
+# Returns a description of the mismatch, or $null when they agree.
+function Get-OpenSslNoticesProblem([string]$NoticesPath, [string[]]$DllPaths) {
+    $text = [IO.File]::ReadAllText($NoticesPath)
+    $named = @([regex]::Matches($text, '\bOpenSSL ([0-9]+\.[0-9]+\.[0-9]+)\b') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    $packaged = @($DllPaths | ForEach-Object {
+        $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($_).ProductVersion
+        if ($version) { $version.Trim() } else { "(no version) $([IO.Path]::GetFileName($_))" }
+    } | Sort-Object -Unique)
+    if ($named.Count -eq 1 -and $packaged.Count -eq 1 -and $named[0] -eq $packaged[0]) { return $null }
+    return "THIRD-PARTY-NOTICES.txt names OpenSSL $(if ($named.Count) { $named -join ', ' } else { '(no X.Y.Z version)' }), but the packaged OpenSSL DLLs are version $($packaged -join ', ')"
+}
+
 # Reads ARN_MSVC_RUNTIME_DIR, the Visual Studio redistributable CRT folder that
 # CMake found for the compiler, from the CMakeCache.txt of a build directory.
 function Get-CMakeRuntimeDir([string]$BuildDir) {

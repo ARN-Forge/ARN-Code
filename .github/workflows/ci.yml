@@ -108,6 +108,28 @@ jobs:
           fi
 
       # The same minimum-OS limits as the release build (see release.yml).
+      # The Windows CLI ZIP as the release packages it (third-party notices must
+      # name the packaged OpenSSL version), for the clean-machine test.
+      - name: Package Windows CLI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $line = & build/Release/arn.exe --version
+          $version = ([regex]::Match($line, '^arn ([0-9]+\.[0-9]+\.[0-9]+) ')).Groups[1].Value
+          if (-not $version) { throw "Cannot read the version from '$line'." }
+          ./scripts/package-windows.ps1 -BuildDir build/Release -OutputDir arn-windows-x64 `
+            -ArchivePath arn-windows-x64.zip -ExpectedVersion $version -ExpectedCommit $env:GITHUB_SHA `
+            -RequireNoticesMatch
+
+      - name: Keep the Windows CLI ZIP for the clean-machine test
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-arn-windows-x64
+          path: arn-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 3
+
       - name: Check minimum OS
         if: runner.os != 'Windows'
         shell: bash
@@ -168,6 +190,26 @@ jobs:
             echo "::endgroup::"
           done
 
+  # The Windows CLI ZIP on a clean Windows: a Windows Server Core container
+  # has no Visual C++ runtime, developer tools or OpenSSL. The package must run
+  # there, must not run without its packaged runtime DLLs, and install.ps1 must
+  # install, reinstall and uninstall it.
+  windows-clean-machine:
+    name: Windows x64 package on a clean Windows
+    needs: build
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ci-arn-windows-x64
+      - name: Run the package in a Windows Server Core container
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path CMakeLists.txt -Pattern 'project\(ArnAgentCode VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          ./tests/windows_clean_machine_test.ps1 -ArchivePath arn-windows-x64.zip `
+            -ExpectedVersion $version -ExpectedCommit $env:GITHUB_SHA
+
   # The Windows IDE built as the release builds it, without publishing or
   # uploading anything: the installer payload and the portable ZIP are
   # verified for this commit, and the production bundle and the running IDE
@@ -226,7 +268,7 @@ jobs:
           node tests/installer_runtime_test.mjs ide/src-tauri/target/installer-smoke
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/verify-ide-package.ps1 -Directory ide/src-tauri/target/installer-smoke `
-            -ExpectedVersion $version -ExpectedCommit $env:GITHUB_SHA
+            -ExpectedVersion $version -ExpectedCommit $env:GITHUB_SHA -RequireNoticesMatch
           $package = "arn-ide-windows-x64"
           New-Item -ItemType Directory -Force $package | Out-Null
           Copy-Item "ide/src-tauri/target/release/arn-ide.exe" "$package/arn-ide.exe"
@@ -238,6 +280,13 @@ jobs:
           Copy-Item "docs/ide-arn-bridge.md" "$package/IDE-README.md"
           Compress-Archive -Path "$package/*" -DestinationPath "arn-ide-windows-x64.zip"
           ./scripts/verify-ide-package.ps1 -ZipPath arn-ide-windows-x64.zip `
+            -ExpectedVersion $version -ExpectedCommit $env:GITHUB_SHA -RequireNoticesMatch
+      - name: Install, reinstall and uninstall the IDE silently
+        shell: pwsh
+        run: |
+          $version = (Get-Content ide/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $setup = @(Get-ChildItem 'ide/src-tauri/target/release/bundle/nsis' -Filter '*-setup.exe')
+          ./tests/ide_installer_lifecycle_test.ps1 -Installer $setup[0].FullName `
             -ExpectedVersion $version -ExpectedCommit $env:GITHUB_SHA
       - name: Check the production bundle
         shell: pwsh
