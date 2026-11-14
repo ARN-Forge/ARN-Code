@@ -340,6 +340,18 @@ if (BUILD_TESTING)
                 COMMAND ${ARN_BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_unix_recovery_test.sh
                         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/install.sh)
             set_tests_properties(unix_install_recovery PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+            # The GitHub side of the release workflow (scripts/release-publish.sh)
+            # against a fake gh and curl; skips (77) without jq.
+            add_test(NAME release_publish
+                COMMAND ${ARN_BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/release_publish_test.sh
+                        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/release-publish.sh)
+            set_tests_properties(release_publish PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+            # Release tags only on commits already on main (scripts/release-check-main.sh),
+            # with real Git repositories; skips (77) without git.
+            add_test(NAME release_main_ancestry
+                COMMAND ${ARN_BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/release_main_ancestry_test.sh
+                        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/release-check-main.sh)
+            set_tests_properties(release_main_ancestry PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
         endif()
     endif()
     # SHA256SUMS generation for the release (scripts/release-checksums.cmake).
@@ -478,7 +490,7 @@ if (BUILD_TESTING)
             LABELS "console;integration")
     else()
         foreach(_arn_unix_test IN ITEMS unix_package_verification unix_install_checksums unix_install_resolver
-                unix_install_upgrade unix_install_recovery)
+                unix_install_upgrade unix_install_recovery release_publish release_main_ancestry)
             if (TEST ${_arn_unix_test})
                 list(APPEND _arn_integration_tests ${_arn_unix_test})
             endif()

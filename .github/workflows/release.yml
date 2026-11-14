@@ -6,11 +6,16 @@ name: Release
 #      DRAFT release with exactly those assets and their SHA256SUMS. Nothing is
 #      public yet.
 #   2. Publishing is a separate, manual run: "Run workflow" on the same tag
-#      with "publish_draft" checked. It checks the draft again (assets,
-#      checksums, prerelease flag) and only then publishes it, as a prerelease
-#      and not the latest release when the policy says so.
+#      with "publish_draft" checked. It finds the draft once, keeps its
+#      numeric release ID, checks it again (assets, checksums, prerelease
+#      flag) and only then publishes that ID, as a prerelease and not the
+#      latest release when the policy says so.
 # A release or draft that already exists for the tag is never replaced or
 # added to: step 1 stops, and the draft has to be removed by hand to retry.
+# Both steps run only for a tag on a commit that is already on main.
+# scripts/release-publish.sh does the GitHub side of both steps; see
+# docs/release-runbook.md for the procedure and for what to do when a check
+# after publication fails.
 on:
   push:
     tags: ["v*"]
@@ -60,7 +65,10 @@ jobs:
       make_latest: ${{ steps.policy.outputs.make_latest }}
       platforms: ${{ steps.policy.outputs.platforms }}
     steps:
+      # The full history, so that ancestry can be shown below.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
 
       - name: Check tag, versions, release notes and platform policy
         id: policy
@@ -70,6 +78,11 @@ jobs:
         run: >-
           cmake "-DREF_TYPE=$REF_TYPE" "-DREF_NAME=$REF_NAME" "-DOUTPUT_FILE=$GITHUB_OUTPUT"
           -P scripts/release-preflight.cmake
+
+      # main is fetched from the remote now; a tag on a commit that is not
+      # (yet) merged into it, such as a pull request branch, is refused.
+      - name: Check that the tagged commit is on main
+        run: bash scripts/release-check-main.sh "$GITHUB_SHA" origin main
 
   # The CLI packages the policy names, and only those: the matrix is the
   # policy's, not a fixed list.
@@ -165,9 +178,10 @@ jobs:
             -ExpectedVersion ($env:REF_NAME.Substring(1)) `
             -ExpectedCommit $env:GITHUB_SHA
 
-      # Archives exactly arn, LICENSE and README.md, checks the entries, runs
-      # the extracted arn with a minimal environment against the tag's version
-      # and commit, and lists its shared libraries. A package that fails is deleted.
+      # Archives exactly arn, LICENSE, README.md and THIRD-PARTY-NOTICES.txt,
+      # checks the entries, runs the extracted arn with a minimal environment
+      # against the tag's version and commit, and lists its shared libraries.
+      # A package that fails is deleted.
       - name: Package and verify Unix archive
         if: runner.os != 'Windows'
         shell: bash
@@ -306,18 +320,13 @@ jobs:
       EXPECTED: ${{ needs.preflight.outputs.expected }}
       PLATFORMS: ${{ needs.preflight.outputs.platforms }}
       PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+      MAKE_LATEST: ${{ needs.preflight.outputs.make_latest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # A rerun must not add to or replace a release, published or draft.
       - name: Refuse to touch an existing release
-        run: |
-          existing="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
-            --jq '.[] | select(.tag_name == env.TAG) | "\(.id) draft=\(.draft)"')"
-          if [ -n "$existing" ]; then
-            echo "::error::A release for $TAG already exists ($existing). It is never replaced or added to; delete the draft by hand to build it again."
-            exit 1
-          fi
+        run: bash scripts/release-publish.sh refuse-existing
 
       # One directory per artifact, so two artifacts with the same file name
       # cannot silently overwrite each other; release-checksums.cmake rejects it.
@@ -362,24 +371,16 @@ jobs:
           generate_release_notes: true
           files: dist/*
 
+      # Exactly one draft for the tag, with the policy's assets and flags.
       - name: Check the draft
         run: |
-          releases="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name == env.TAG)' | jq -s .)"
-          [ "$(echo "$releases" | jq length)" = 1 ] || { echo "::error::Expected exactly one release for $TAG."; exit 1; }
-          [ "$(echo "$releases" | jq '.[0].draft')" = true ] || { echo "::error::The release for $TAG is not a draft."; exit 1; }
-          [ "$(echo "$releases" | jq '.[0].prerelease')" = "$PRERELEASE" ] || { echo "::error::The draft's prerelease flag is not $PRERELEASE."; exit 1; }
-          actual="$(echo "$releases" | jq -r '.[0].assets[].name' | LC_ALL=C sort)"
-          wanted="$( { echo "$EXPECTED" | tr ';' '\n'; echo SHA256SUMS; } | LC_ALL=C sort)"
-          if [ "$actual" != "$wanted" ]; then
-            echo "::error::The draft's assets differ from the policy."
-            diff <(echo "$wanted") <(echo "$actual") || true
-            exit 1
-          fi
-          echo "Draft release for $TAG is ready: prerelease=$PRERELEASE, assets: $(echo $actual)."
+          bash scripts/release-publish.sh find-draft "$RUNNER_TEMP/draft-release.json"
           echo "Publish it with: Run workflow on $TAG, publish_draft checked."
 
-  # Step 2, started by hand on the tag with publish_draft checked: checks the
-  # draft once more, publishes it as the policy says, and checks the result.
+  # Step 2, started by hand on the tag with publish_draft checked. The draft is
+  # found once and handled by its release ID from then on: its files are
+  # downloaded by asset ID and checked against SHA256SUMS, the same ID is
+  # checked again just before it is published, and checked after.
   publish:
     name: Publish the draft release
     needs: preflight
@@ -395,39 +396,19 @@ jobs:
       PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
       MAKE_LATEST: ${{ needs.preflight.outputs.make_latest }}
     steps:
-      - name: Check the draft and its assets
-        run: |
-          releases="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name == env.TAG)' | jq -s .)"
-          [ "$(echo "$releases" | jq length)" = 1 ] || { echo "::error::Expected exactly one release for $TAG."; exit 1; }
-          [ "$(echo "$releases" | jq '.[0].draft')" = true ] || { echo "::error::The release for $TAG is not a draft; nothing to publish."; exit 1; }
-          [ "$(echo "$releases" | jq '.[0].prerelease')" = "$PRERELEASE" ] || { echo "::error::The draft's prerelease flag is not $PRERELEASE."; exit 1; }
-          actual="$(echo "$releases" | jq -r '.[0].assets[].name' | LC_ALL=C sort)"
-          wanted="$( { echo "$EXPECTED" | tr ';' '\n'; echo SHA256SUMS; } | LC_ALL=C sort)"
-          [ "$actual" = "$wanted" ] || { echo "::error::The draft's assets differ from the policy."; diff <(echo "$wanted") <(echo "$actual") || true; exit 1; }
-          mkdir draft
-          gh release download "$TAG" --dir draft
-          cd draft
-          listed="$(awk '{ print $2 }' SHA256SUMS | LC_ALL=C sort)"
-          [ "$listed" = "$(echo "$EXPECTED" | tr ';' '\n' | LC_ALL=C sort)" ] || { echo "::error::SHA256SUMS does not list exactly the policy's assets."; exit 1; }
-          sha256sum --check --strict SHA256SUMS
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Publish
-        run: gh release edit "$TAG" --draft=false "--prerelease=$PRERELEASE" "--latest=$MAKE_LATEST"
+      - name: Find the draft release and keep its ID
+        run: bash scripts/release-publish.sh find-draft "$RUNNER_TEMP/draft-release.json"
 
-      # After publication: marked as the policy says, and a prerelease is not
-      # the latest release.
+      - name: Download the draft's files and check them against SHA256SUMS
+        run: bash scripts/release-publish.sh download "$RUNNER_TEMP/draft-release.json" "$RUNNER_TEMP/draft"
+
+      - name: Publish the draft by its ID
+        run: bash scripts/release-publish.sh publish "$RUNNER_TEMP/draft-release.json"
+
+      # After publication: the same ID, marked as the policy says, and a
+      # prerelease is not the latest release. Nothing is rolled back
+      # automatically; see docs/release-runbook.md.
       - name: Check the published release
-        run: |
-          release="$(gh api "repos/$GH_REPO/releases/tags/$TAG")"
-          [ "$(echo "$release" | jq '.draft')" = false ] || { echo "::error::$TAG is still a draft."; exit 1; }
-          [ "$(echo "$release" | jq '.prerelease')" = "$PRERELEASE" ] || { echo "::error::$TAG prerelease flag is not $PRERELEASE."; exit 1; }
-          latest="$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name || echo none)"
-          if [ "$MAKE_LATEST" = false ] && [ "$latest" = "$TAG" ]; then
-            echo "::error::$TAG became the latest release, but its policy says it must not."
-            exit 1
-          fi
-          if [ "$MAKE_LATEST" = true ] && [ "$latest" != "$TAG" ]; then
-            echo "::error::$TAG should be the latest release, but the latest is $latest."
-            exit 1
-          fi
-          echo "$TAG published: prerelease=$PRERELEASE; the latest release is $latest."
+        run: bash scripts/release-publish.sh check-published "$RUNNER_TEMP/draft-release.json"

@@ -75,6 +75,8 @@ endforeach()
 
 # The policy decides what is built and published.
 require(preflight "${_preflight}" "\"-DOUTPUT_FILE=$GITHUB_OUTPUT\"" "the policy is passed on as job outputs")
+require(preflight "${_preflight}" "fetch-depth: 0" "the full history, so ancestry can be shown")
+require(preflight "${_preflight}" "bash scripts/release-check-main.sh \"$GITHUB_SHA\" origin main" "only a commit already on main is released")
 require(build "${_build}" "matrix: \${{ fromJSON(needs.preflight.outputs.build_matrix) }}" "only the policy's CLI packages are built")
 require(build "${_build}" "needs: preflight" "nothing is built before the preflight passes")
 require(ide-windows "${_ide}" "needs.preflight.outputs.windows_ide == 'true'" "the Windows IDE is built only when the policy names it")
@@ -91,6 +93,8 @@ require(draft "${_draft}" "EXPECTED: \${{ needs.preflight.outputs.expected }}" "
 require(draft "${_draft}" "\"-DEXPECTED=$EXPECTED\"" "SHA256SUMS lists exactly the policy's assets")
 forbid(draft "${_draft}" "-DEXPECTED=arn-" "no fixed asset list")
 require(draft "${_draft}" "Refuse to touch an existing release" "a rerun never adds to or replaces a release")
+require(draft "${_draft}" "bash scripts/release-publish.sh refuse-existing" "the existing-release check is the tested script")
+require(draft "${_draft}" "bash scripts/release-publish.sh find-draft" "the created draft is checked by the tested script")
 require(draft "${_draft}" "Check that no left-out Windows package is present" "left-out Windows packages fail closed")
 require(draft "${_draft}" "sha256sum --check --strict SHA256SUMS" "an independent check of the manifest")
 require(draft "${_draft}" "draft: true" "nothing is published by the tag push")
@@ -99,23 +103,29 @@ require(draft "${_draft}" "make_latest: \${{ needs.preflight.outputs.make_latest
 require(draft "${_draft}" "overwrite_files: false" "existing assets are never replaced")
 require(draft "${_draft}" "fail_on_unmatched_files: true" "a missing file fails")
 require(draft "${_draft}" "Check the draft" "the draft is checked after it is created")
-forbid(draft "${_draft}" "gh release edit" "the draft job never publishes")
+forbid(draft "${_draft}" "release-publish.sh publish" "the draft job never publishes")
 
 # Step 2: publishing is a separate, manual run on the tag.
 require(publish "${_publish}" "github.event_name == 'workflow_dispatch' && inputs.publish_draft" "publishing needs a manual run")
 require(publish "${_publish}" "needs: preflight" "the tag's policy is checked again")
-require(publish "${_publish}" "sha256sum --check --strict SHA256SUMS" "the draft's files are checked before publishing")
-require(publish "${_publish}" "gh release edit \"$TAG\" --draft=false \"--prerelease=$PRERELEASE\" \"--latest=$MAKE_LATEST\""
-    "published as the policy says")
-require(publish "${_publish}" "became the latest release, but its policy says it must not" "the result is checked")
+require(publish "${_publish}" "bash scripts/release-publish.sh find-draft \"$RUNNER_TEMP/draft-release.json\"" "the draft is found once, by tag")
+require(publish "${_publish}" "bash scripts/release-publish.sh download \"$RUNNER_TEMP/draft-release.json\"" "the draft's files are checked by asset ID")
+require(publish "${_publish}" "bash scripts/release-publish.sh publish \"$RUNNER_TEMP/draft-release.json\"" "published by release ID")
+require(publish "${_publish}" "bash scripts/release-publish.sh check-published \"$RUNNER_TEMP/draft-release.json\"" "the result is checked")
+require(publish "${_publish}" "MAKE_LATEST: \${{ needs.preflight.outputs.make_latest }}" "the latest flag is the policy's")
 
 # Exactly one place creates a release (the draft) and one publishes it; no
 # job publishes directly.
 count_of("${_workflow}" "softprops/action-gh-release@" _creators)
-count_of("${_workflow}" "gh release edit" _publishers)
+count_of("${_workflow}" "release-publish.sh publish" _publishers)
 if (NOT _creators EQUAL 1 OR NOT _publishers EQUAL 1)
     list(APPEND _failures "release.yml: ${_creators} release creation steps and ${_publishers} publication steps, expected 1 and 1")
 endif()
+# No release is looked up by tag again with gh release (whose draft lookup is
+# not documented); everything after the first lookup uses the release ID.
+forbid(release.yml "${_workflow}" "gh release download" "drafts are downloaded by asset ID")
+forbid(release.yml "${_workflow}" "gh release edit" "drafts are published by release ID")
+forbid(release.yml "${_workflow}" "gh release view" "releases are not looked up by tag with gh release")
 forbid(release.yml "${_workflow}" "draft: false" "a release is never created already published")
 forbid(release.yml "${_workflow}" "overwrite_files: true" "existing assets are never replaced")
 forbid(release.yml "${_workflow}" "make_latest: true" "the latest flag comes from the policy")

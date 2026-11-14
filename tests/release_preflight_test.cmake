@@ -244,6 +244,22 @@ policy_case(not-an-object POLICY RAW "[\"linux-x64\"]"
     MESSAGES "release/platforms.json is not a JSON object")
 policy_case(not-json POLICY RAW "linux-x64, macos-arm64"
     MESSAGES "release/platforms.json is not a JSON object")
+policy_case(reason-not-a-string POLICY VERSION 1.2.3 REASON 42
+    MESSAGES "has a \"reason\" that is not a string")
+# CMake's parser silently keeps one of two equal keys; the preflight finds the
+# second one in the text.
+policy_case(duplicate-prerelease-key POLICY RAW
+    "{\"format\": \"arn-release-platforms/1\", \"version\": \"1.2.3\", \"platforms\": [${_partial_platforms}], \"prerelease\": false, \"prerelease\": true, \"reason\": \"x\"}"
+    MESSAGES "has the key \"prerelease\" 2 times")
+policy_case(duplicate-platforms-key POLICY RAW
+    "{\"format\": \"arn-release-platforms/1\", \"version\": \"1.2.3\", \"platforms\": [\"linux-x64\"], \"platforms\" : [${_partial_platforms}], \"prerelease\": true, \"reason\": \"x\"}"
+    MESSAGES "has the key \"platforms\" 2 times")
+# The same words inside the reason string are not a key.
+make_fixture("${WORK_DIR}/key-words-in-reason" 1.2.3)
+write_policy("${WORK_DIR}/key-words-in-reason" VERSION 1.2.3
+    REASON "\"Windows is left out; it is not \\\"prerelease\\\": false and has no \\\"platforms\\\": entry yet.\"")
+expect("key words inside the reason" "${WORK_DIR}/key-words-in-reason" tag v1.2.3 pass)
+
 make_fixture("${WORK_DIR}/no-policy" 1.2.3)
 file(REMOVE "${WORK_DIR}/no-policy/release/platforms.json")
 expect("missing policy" "${WORK_DIR}/no-policy" tag v1.2.3 fail "release/platforms.json is missing")
