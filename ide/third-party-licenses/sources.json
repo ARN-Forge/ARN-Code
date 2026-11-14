@@ -93,7 +93,8 @@
     "nsis": {
       "name": "NSIS (Nullsoft Scriptable Install System)",
       "version": "3.11",
-      "license": "zlib/libpng; the LZMA compression module under the Common Public License 1.0 with a special exception (see COPYING)",
+      "license": "zlib/libpng (the installer uses NSIS's zlib compression module; the LZMA and bzip2 modules, which COPYING also describes, are not included)",
+      "compression": "zlib",
       "where": "installer stub and the plug-ins System, nsDialogs, StartMenu, LangDLL and NSISdl in arn-ide-windows-x64-setup.exe, and the uninstall.exe it installs",
       "source": "https://github.com/nsis-dev/nsis/tree/v311; the Tauri CLI uses https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip (a copy of https://sourceforge.net/projects/nsis/files/NSIS%203/3.11/nsis-3.11.zip)",
       "cliPattern": "nsis-([0-9][0-9.]*)/nsis-[0-9][0-9.]*\\.zip",

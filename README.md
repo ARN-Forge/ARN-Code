@@ -55,6 +55,11 @@ The installer uses `%LOCALAPPDATA%\Arn\bin`, adds it to your user `PATH`, and
 verifies the installed executable. Open a new terminal if `arn` is not yet
 visible in another terminal window.
 
+ARN Code on Windows needs the **Microsoft Visual C++ Redistributable (x64)**,
+which it does not ship. If it is missing, the installer stops before changing
+anything and shows Microsoft's link, <https://aka.ms/vc14/vc_redist.x64.exe>:
+install it (this needs administrator rights) and run the installer again.
+
 This installs the latest **stable** release. There is no Windows build of the
 v0.9.0 prerelease (see [Versions, prereleases and downgrades](#versions-prereleases-and-downgrades)).
 
@@ -334,15 +339,15 @@ A release contains some or all of these archives:
 - **macOS Intel CLI:** `arn-macos-x64.tar.gz`
 
 The Windows packages that the current release workflow builds are not part of
-the v0.9.0 prerelease (see above). As built, the Windows CLI archive runs on
-Windows 10 and 11 x64 without a separate Visual C++ Redistributable: next to
-`arn.exe` it carries the OpenSSL DLLs and the Microsoft Visual C++ runtime DLLs
-that `arn.exe` imports (for example `vcruntime140.dll` and `msvcp140.dll`),
-copied unchanged, Microsoft-signed, from Visual Studio's redistributable folder
-for the compiler that built it (app-local deployment). Windows Update does not
-service app-local copies; they are updated with each ARN release. The v0.8.0
-Windows CLI archive does not carry these runtime files and needs the Visual C++
-Redistributable installed.
+the v0.9.0 prerelease (see above). As built, they need the **Microsoft Visual
+C++ Redistributable (x64)** on Windows 10 or 11 x64. ARN Code does not ship
+the Visual C++ runtime: install it once from Microsoft,
+<https://aka.ms/vc14/vc_redist.x64.exe> (installing it needs administrator
+rights; Windows Update keeps it up to date). Many computers already have it.
+The Windows CLI archive carries `arn.exe` and the OpenSSL DLLs it needs.
+`install.ps1` and the IDE installer check for the runtime before they change
+anything; when it is missing they stop with that link, and they never download
+or install it themselves. ARN itself needs no administrator rights.
 
 From v0.9.0 on, every release archive contains `THIRD-PARTY-NOTICES.txt` with
 the licenses of the third-party software in it; the Windows IDE packages also

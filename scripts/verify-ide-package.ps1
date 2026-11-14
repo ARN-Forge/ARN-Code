@@ -21,9 +21,10 @@ param(
 # For both:
 #   - every required file is non-empty;
 #   - every DLL that arn.exe or arn-ide.exe imports, directly or through a
-#     packaged DLL, is packaged, a Windows component in System32, or an API
-#     set; the Visual C++ runtime must be packaged and signed by Microsoft;
-#     no packaged DLL is unused;
+#     packaged DLL, is packaged, a Windows component in System32, an API set,
+#     or the Microsoft Visual C++ runtime, which is a prerequisite that users
+#     install from Microsoft and must NOT be packaged (a debug runtime is
+#     refused); no packaged DLL is unused;
 #   - THIRD-PARTY-NOTICES.txt names the version of the packaged OpenSSL DLLs
 #     (enforced with -RequireNoticesMatch, otherwise a warning);
 #   - arn.exe --version, run with only System32 on PATH, prints exactly
@@ -95,6 +96,10 @@ try {
     $system = Join-Path $env:SystemRoot "System32"
     $packagedDlls = @{}
     foreach ($file in @(Get-ChildItem -LiteralPath $root -File -Filter '*.dll')) { $packagedDlls[$file.Name.ToLowerInvariant()] = $file.Name }
+    $packagedRuntime = @($packagedDlls.Keys | Where-Object { (Test-VcRuntime $_) -or (Test-DebugVcRuntime $_) } | ForEach-Object { $packagedDlls[$_] })
+    if ($packagedRuntime.Count) {
+        throw "The package contains the Microsoft Visual C++ runtime ($($packagedRuntime -join ', ')); it must not be shipped: users install the Visual C++ Redistributable from Microsoft ($VcRedistUrl)."
+    }
     $needed = @{}
     $missing = New-Object System.Collections.Generic.List[string]
     $queue = New-Object System.Collections.Generic.Queue[string]
@@ -109,11 +114,13 @@ try {
         try { $imports = Get-PeImports $file } catch { throw "Cannot read the imports of ${fileName}; it is not a valid x64 executable: $($_.Exception.Message)" }
         foreach ($import in $imports) {
             if (Test-ApiSet $import) { continue }
-            if ($packagedDlls.ContainsKey($import)) {
+            if (Test-DebugVcRuntime $import) {
+                $missing.Add("$import (the debug Visual C++ runtime, which no Redistributable installs; imported by $fileName)")
+            } elseif (Test-VcRuntime $import) {
+                continue   # prerequisite, installed from Microsoft
+            } elseif ($packagedDlls.ContainsKey($import)) {
                 $needed[$import] = $true
                 $queue.Enqueue((Join-Path $root $packagedDlls[$import]))
-            } elseif (Test-VcRuntime $import) {
-                $missing.Add("$import (Visual C++ runtime, imported by $fileName)")
             } elseif (-not (Test-Path -LiteralPath (Join-Path $system $import))) {
                 $missing.Add("$import (imported by $fileName)")
             }
@@ -122,7 +129,6 @@ try {
     if ($missing.Count) { throw "Imports that are not packaged and not part of Windows: $($missing -join ', ')." }
     $unneeded = @($packagedDlls.Keys | Where-Object { -not $needed.ContainsKey($_) } | ForEach-Object { $packagedDlls[$_] })
     if ($unneeded.Count) { throw "Packaged DLLs that neither arn.exe nor arn-ide.exe uses: $($unneeded -join ', ')." }
-    foreach ($dll in @($packagedDlls.Keys | Where-Object { Test-VcRuntime $_ })) { Assert-MicrosoftSigned (Join-Path $root $packagedDlls[$dll]) }
     $openSsl = @($packagedDlls.Keys | Where-Object { Test-OpenSslDll $_ } | ForEach-Object { Join-Path $root $packagedDlls[$_] })
     if ($openSsl.Count) {
         $noticesProblem = Get-OpenSslNoticesProblem (Join-Path $root "THIRD-PARTY-NOTICES.txt") $openSsl

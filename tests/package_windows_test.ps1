@@ -1,9 +1,11 @@
 param([Parameter(Mandatory = $true)][string]$BuildDir)
 
 # Tests scripts/package-windows.ps1 and scripts/verify-windows-package.ps1 with
-# ZIPs built in a temporary directory from the real arn.exe, its DLLs and the
-# Visual C++ runtime from Visual Studio's redistributable folder.
-# Exits 77 (skipped) for a Debug build: its debug runtime cannot be packaged.
+# ZIPs built in a temporary directory from the real arn.exe and its DLLs. The
+# Microsoft Visual C++ runtime is a prerequisite that users install from
+# Microsoft: a package must not contain it.
+# Exits 77 (skipped) for a Debug build: it needs the debug runtime, which no
+# Redistributable installs.
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression
@@ -21,12 +23,14 @@ $failures = New-Object System.Collections.Generic.List[string]
 $cases = 0
 
 if (@(Get-PeImports $exe | Where-Object { $_ -match '^(vcruntime140(_1)?d|msvcp140d)' }).Count) {
-    Write-Host "skip: arn.exe is a Debug build; its debug Visual C++ runtime cannot be redistributed"
+    Write-Host "skip: arn.exe is a Debug build; it needs the debug Visual C++ runtime, which no Redistributable installs"
     exit 77
 }
-$runtimeDir = Get-CMakeRuntimeDir $BuildDir
-if (-not $runtimeDir -or -not (Test-Path -LiteralPath (Join-Path $runtimeDir "vcruntime140.dll"))) {
-    throw "ARN_MSVC_RUNTIME_DIR is not set or not found ('$runtimeDir'); configure with MSVC."
+# This machine's Visual C++ runtime (the Redistributable), used only to build
+# packages that wrongly contain it.
+$system = Join-Path $env:SystemRoot "System32"
+if (-not (Test-Path -LiteralPath (Join-Path $system "vcruntime140.dll"))) {
+    throw "This machine has no Visual C++ runtime in System32; install the Visual C++ Redistributable to run arn.exe."
 }
 
 $line = & $exe --version
@@ -36,9 +40,9 @@ if ($line -notmatch '^arn ([0-9]+\.[0-9]+\.[0-9]+) \(([0-9a-f]{12}(-dirty)?|unkn
 $version = $Matches[1]
 $commit = $Matches[2]
 
-# The Visual C++ runtime files arn.exe needs, worked out here independently
-# of package-windows.ps1 by following imports through the build directory and
-# the redistributable folder.
+# The Visual C++ runtime files arn.exe and its packaged DLLs need, worked out
+# here independently of package-windows.ps1 by following imports through the
+# build directory. They are prerequisites, not package contents.
 $expectedRuntime = @{}
 $queue = New-Object System.Collections.Generic.Queue[string]
 $queue.Enqueue($exe)
@@ -50,7 +54,6 @@ while ($queue.Count) {
         $visited[$import] = $true
         if (Test-VcRuntime $import) {
             $expectedRuntime[$import] = $true
-            $queue.Enqueue((Join-Path $runtimeDir $import))
         } elseif (Test-Path -LiteralPath (Join-Path $BuildDir $import)) {
             $queue.Enqueue((Join-Path $BuildDir $import))
         }
@@ -121,12 +124,6 @@ function Test-Verify([string]$Name, [string]$Zip, [bool]$ShouldPass, [string[]]$
     Write-Host "ok: $Name"
 }
 
-function Copy-Modified([string]$Source, [string]$Destination, [int]$Offset) {
-    $bytes = [IO.File]::ReadAllBytes($Source)
-    $bytes[$Offset] = $bytes[$Offset] -bxor 0xFF
-    [IO.File]::WriteAllBytes($Destination, $bytes)
-}
-
 try {
     New-Item -ItemType Directory -Path $root | Out-Null
 
@@ -151,32 +148,25 @@ try {
     $cryptoDll = $cryptoDll[0]
     $sslDll = $sslDll[0]
 
-    # The package ships exactly the Visual C++ runtime that arn.exe needs.
+    # The package contains no Visual C++ runtime file; arn.exe needs it.
     $script:cases++
-    $packagedRuntime = @($packagedNames | Where-Object { Test-VcRuntime $_ } | Sort-Object)
-    $wantedRuntime = @($expectedRuntime.Keys | Sort-Object)
-    if (-not $wantedRuntime.Count -or ($packagedRuntime -join ',') -ne ($wantedRuntime -join ',')) {
-        $failures.Add("packaged Visual C++ runtime [$($packagedRuntime -join ', ')] differs from the needed [$($wantedRuntime -join ', ')]")
-    } elseif ($packagedNames -notcontains 'vcruntime140.dll') {
-        $failures.Add("vcruntime140.dll is not packaged")
+    $packagedRuntime = @($packagedNames | Where-Object { (Test-VcRuntime $_) -or (Test-DebugVcRuntime $_) } | Sort-Object)
+    if ($packagedRuntime.Count) {
+        $failures.Add("the package contains the Visual C++ runtime: $($packagedRuntime -join ', ')")
+    } elseif (-not $expectedRuntime.ContainsKey('vcruntime140.dll')) {
+        $failures.Add("arn.exe does not import vcruntime140.dll; the prerequisite cases would test nothing")
     } else {
-        Write-Host "ok: the package has exactly the needed Visual C++ runtime: $($packagedRuntime -join ', ')"
+        Write-Host "ok: the package contains no Visual C++ runtime file (arn.exe needs $(@($expectedRuntime.Keys | Sort-Object) -join ', ') as a prerequisite)"
     }
-    $script:cases++
-    $sourceMismatch = @($packagedRuntime | Where-Object {
-        (Get-FileHash -LiteralPath (Join-Path $packageDir $_)).Hash -ne (Get-FileHash -LiteralPath (Join-Path $runtimeDir $_)).Hash
-    })
-    if ($sourceMismatch.Count) { $failures.Add("packaged runtime differs from the redistributable folder: $($sourceMismatch -join ', ')") }
-    else { Write-Host "ok: the packaged runtime files are the redistributable folder's files" }
 
     Test-Verify "valid package without expectations" $packageZip $true @(
         "Extracted arn.exe: arn $version",
         # Transitive dependency: libcrypto through libssl.
         "$cryptoDll (imported by $sslDll)",
+        # The Visual C++ runtime is a prerequisite, reported as such.
+        "prerequisite:", "vcruntime140.dll (imported by arn.exe)",
         # Loaded by Windows from the extracted directory, with only System32 on PATH.
-        "loaded from the package: vcruntime140.dll",
-        "loaded from the package: $sslDll",
-        "vcruntime140.dll $((Get-Item -LiteralPath (Join-Path $runtimeDir 'vcruntime140.dll')).VersionInfo.FileVersion), signed by Microsoft")
+        "loaded from the package: $sslDll")
     if ($commit -match '^[0-9a-f]{12}$') {
         Test-Verify "valid package with exact version and commit" $packageZip $true @() `
             @('-ExpectedVersion', $version, '-ExpectedCommit', $commit)
@@ -248,23 +238,19 @@ try {
     elseif (Test-Path -LiteralPath $rejectedZip) { $failures.Add("package-windows.ps1 left an unverified archive") }
     else { Write-Host "ok: package-windows.ps1 removes an archive that fails verification" }
 
-    # package-windows.ps1 refuses a runtime folder without the needed files.
+    # package-windows.ps1 never packages the Visual C++ runtime, even when the
+    # build directory holds a copy of it.
     $script:cases++
-    $emptyRuntime = Join-Path $root "empty-runtime"
-    New-Item -ItemType Directory -Path $emptyRuntime | Out-Null
-    $ErrorActionPreference = "Continue"
-    $text = ConvertTo-PlainText (& $shell -NoProfile -ExecutionPolicy Bypass -File $packageScript -BuildDir $BuildDir `
-        -OutputDir (Join-Path $root "no-runtime") -ArchivePath (Join-Path $root "no-runtime.zip") `
-        -RuntimeDir $emptyRuntime 2>&1)
-    $noRuntimeExit = $LASTEXITCODE
-    $ErrorActionPreference = "Stop"
-    if ($noRuntimeExit -eq 0 -or $text -notmatch 'is not in the Visual C\+\+ redistributable folder') {
-        $failures.Add("package-windows.ps1 with an empty runtime folder: exit $noRuntimeExit, $text")
-    } elseif (Test-Path -LiteralPath (Join-Path $root "no-runtime.zip")) {
-        $failures.Add("package-windows.ps1 left an archive without the runtime")
-    } else {
-        Write-Host "ok: package-windows.ps1 requires the redistributable Visual C++ runtime"
-    }
+    $buildCopy = Join-Path $root "build-with-runtime"
+    New-Item -ItemType Directory -Path $buildCopy | Out-Null
+    Copy-Item -LiteralPath $exe -Destination $buildCopy
+    foreach ($dll in @(Get-ChildItem -LiteralPath $BuildDir -File -Filter '*.dll')) { Copy-Item -LiteralPath $dll.FullName -Destination $buildCopy }
+    foreach ($dll in @($expectedRuntime.Keys)) { Copy-Item -LiteralPath (Join-Path $system $dll) -Destination $buildCopy -Force }
+    $copyPackage = Join-Path $root "package-from-copy"
+    & $packageScript -BuildDir $buildCopy -OutputDir $copyPackage -ArchivePath (Join-Path $root "package-from-copy.zip") | Out-Null
+    $copied = @(Get-ChildItem -LiteralPath $copyPackage -File | Where-Object { Test-VcRuntime $_.Name } | ForEach-Object Name)
+    if ($copied.Count) { $failures.Add("package-windows.ps1 packaged the Visual C++ runtime from the build directory: $($copied -join ', ')") }
+    else { Write-Host "ok: package-windows.ps1 leaves the Visual C++ runtime out, even when the build directory has it" }
 
     # Malformed packages.
     $zip = Join-Path $root "missing.zip"
@@ -283,9 +269,15 @@ try {
     New-Zip $zip ($standard + , @('unrelated.dll', (Join-Path $packageDir $sslDll)))
     Test-Verify "unexpected DLL" $zip $false @("Packaged DLLs that arn.exe does not use: unrelated.dll")
 
-    $zip = Join-Path $root "unused-runtime.zip"
-    New-Zip $zip ($standard + , @('concrt140.dll', (Join-Path $runtimeDir 'concrt140.dll')))
-    Test-Verify "unused Visual C++ runtime DLL" $zip $false @("Packaged DLLs that arn.exe does not use: concrt140.dll")
+    $zip = Join-Path $root "with-runtime.zip"
+    New-Zip $zip ($standard + , @('vcruntime140.dll', (Join-Path $system 'vcruntime140.dll')))
+    Test-Verify "package containing the Visual C++ runtime" $zip $false `
+        @("The package contains the Microsoft Visual C++ runtime (vcruntime140.dll); it must not be shipped", "https://aka.ms/vc14/vc_redist.x64.exe")
+
+    $zip = Join-Path $root "with-debug-runtime.zip"
+    New-Zip $zip ($standard + , @('vcruntime140d.dll', 'not a real DLL'))
+    Test-Verify "package containing the debug Visual C++ runtime" $zip $false `
+        @("The package contains the Microsoft Visual C++ runtime (vcruntime140d.dll)")
 
     $zip = Join-Path $root "duplicate.zip"
     New-Zip $zip ($standard + , @('LICENSE', 'second copy'))
@@ -303,38 +295,10 @@ try {
     New-Zip $zip ($standard + , @('C:/evil.txt', 'evil'))
     Test-Verify "rooted entry" $zip $false @("entry 'C:/evil.txt' is not a plain file name")
 
-    $zip = Join-Path $root "missing-runtime.zip"
-    New-Zip $zip @($standard | Where-Object { $_[0] -ne 'vcruntime140_1.dll' })
-    Test-Verify "missing Visual C++ runtime DLL" $zip $false @("vcruntime140_1.dll (Visual C++ runtime, imported by arn.exe)")
-
     $zip = Join-Path $root "missing-openssl.zip"
     New-Zip $zip @($standard | Where-Object { $_[0] -ne $cryptoDll })
     Test-Verify "missing transitive dependency" $zip $false @(
         "$cryptoDll (imported by $sslDll)", "not packaged and not part of Windows")
-
-    # Wrong architecture: the official x86 build of the same runtime file.
-    $x86Runtime = Join-Path ($runtimeDir -replace '[\\/]x64[\\/]', '\x86\') "vcruntime140.dll"
-    $wrongArch = Join-Path $root "vcruntime140-x86.dll"
-    if (Test-Path -LiteralPath $x86Runtime) {
-        Copy-Item -LiteralPath $x86Runtime -Destination $wrongArch
-    } else {
-        # No x86 redistributable installed: mark an x64 copy as i386 instead.
-        $bytes = [IO.File]::ReadAllBytes((Join-Path $runtimeDir "vcruntime140.dll"))
-        $pe = [BitConverter]::ToInt32($bytes, 0x3C)
-        $bytes[$pe + 4] = 0x4C
-        $bytes[$pe + 5] = 0x01
-        [IO.File]::WriteAllBytes($wrongArch, $bytes)
-    }
-    $zip = Join-Path $root "wrong-arch.zip"
-    New-Zip $zip (@($standard | Where-Object { $_[0] -ne 'vcruntime140.dll' }) + , @('vcruntime140.dll', $wrongArch))
-    Test-Verify "Visual C++ runtime of the wrong architecture" $zip $false @("vcruntime140.dll is not an x64 image")
-
-    # A runtime file that is no longer Microsoft's (one byte changed).
-    $tampered = Join-Path $root "vcruntime140_1-tampered.dll"
-    Copy-Modified (Join-Path $runtimeDir "vcruntime140_1.dll") $tampered 0x1000
-    $zip = Join-Path $root "tampered-runtime.zip"
-    New-Zip $zip (@($standard | Where-Object { $_[0] -ne 'vcruntime140_1.dll' }) + , @('vcruntime140_1.dll', $tampered))
-    Test-Verify "modified Visual C++ runtime DLL" $zip $false @("vcruntime140_1.dll is not a file signed by Microsoft")
 
     # An arn.exe that cannot run.
     $truncated = Join-Path $root "truncated-arn.exe"

@@ -157,6 +157,13 @@ for (const key of ['nsis', 'nsis-tauri-utils']) {
     throw new Error(`the Tauri CLI uses ${entry.name} ${found.join(', ') || '(not found)'}, but ide/third-party-licenses/sources.json describes ${entry.version}`);
   }
 }
+// The notices describe NSIS's zlib compression module only, so the installer
+// must be built with it (not the LZMA module, which COPYING licenses under the
+// Common Public License 1.0).
+const nsisConfig = JSON.parse(fs.readFileSync(path.join(ide, 'src-tauri', 'tauri.windows.conf.json'), 'utf8')).bundle.windows.nsis;
+if (nsisConfig.compression !== others.nsis.compression) {
+  throw new Error(`ide/src-tauri/tauri.windows.conf.json builds the installer with NSIS compression "${nsisConfig.compression}", but ide/third-party-licenses/sources.json describes "${others.nsis.compression}"`);
+}
 const otherList = Object.values(others);
 for (const entry of otherList) {
   for (const file of entry.files) addText(readOther(file), `${entry.name} ${entry.version} (${path.posix.basename(file.path)}; ${entry.where})`);
@@ -190,8 +197,10 @@ and notice files that each component's published package ships are
 reproduced verbatim; identical texts appear once, followed by the components
 that ship them.
 
-The ARN Code backend bundled with the IDE (arn.exe, OpenSSL and Microsoft
-Visual C++ runtime DLLs) is covered by THIRD-PARTY-NOTICES.txt.
+The ARN Code backend bundled with the IDE (arn.exe and the OpenSSL DLLs) is
+covered by THIRD-PARTY-NOTICES.txt. The Microsoft Visual C++ runtime is not
+included: it is installed from Microsoft (the Microsoft Visual C++
+Redistributable, https://aka.ms/vc14/vc_redist.x64.exe).
 
 The npm packages are the production dependency tree of the frontend, which
 can be more than the bundle contains. The code editor, Monaco Editor, is

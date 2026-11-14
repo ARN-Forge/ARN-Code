@@ -12,7 +12,8 @@ Contents
   3. ARN Core                    - compiled into arn / arn.exe (all packages)
   4. OpenSSL 3                   - DLLs shipped in the Windows packages only
                                    (Linux and macOS use the system's OpenSSL)
-  5. Microsoft Visual C++ runtime - DLLs shipped in the Windows packages only
+  5. Microsoft Visual C++ runtime - not included: a prerequisite of the Windows
+                                   packages, installed from Microsoft
 
 ================================================================================
 
@@ -318,14 +319,12 @@ SOFTWARE.
 ================================================================================
 
 5. Microsoft Visual C++ runtime
-   Files: vcruntime140.dll, vcruntime140_1.dll, msvcp140.dll,
-          msvcp140_atomic_wait.dll (Windows packages only), unmodified, from
-          the Visual Studio "VC\Redist\MSVC\<version>\x64\Microsoft.VC145.CRT"
-          redistributable folder.
-   These files are Microsoft software, distributed as "Distributable Code"
-   under the Microsoft Software License Terms of Visual Studio. They are not
-   covered by the MIT License of ARN Code. See
-   https://learn.microsoft.com/en-us/visualstudio/releases/2026/redistribution
-   Microsoft publishes its license terms for these runtime files ("Microsoft
-   Visual C++ V14 Redistributable and Runtime") at
-   https://visualstudio.microsoft.com/license-terms/vs2026-ga-visualcpp-v14-redist-runtime/
+   Not included in any ARN Code package. arn.exe and the OpenSSL DLLs of the
+   Windows packages need the Microsoft Visual C++ runtime (for example
+   vcruntime140.dll and msvcp140.dll). ARN Code does not distribute it: it is
+   installed from Microsoft, with the Microsoft Visual C++ Redistributable for
+   x64 (https://aka.ms/vc14/vc_redist.x64.exe; see
+   https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist), under
+   Microsoft's license terms, which Microsoft's installer shows. The Windows
+   installers of ARN Code check that it is installed and stop with this link
+   when it is not; they never download or install it themselves.

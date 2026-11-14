@@ -10,19 +10,25 @@ param(
 
 # Runs the Windows CLI package on a clean Windows: a Windows Server Core
 # container, which has no Visual C++ runtime, no developer tools and no
-# OpenSSL. Inside it:
+# OpenSSL. The package does not ship the Microsoft Visual C++ runtime: it is a
+# prerequisite that users install from Microsoft. Inside the container:
 #   1. checks that the machine really is clean (no Visual C++ runtime in
 #      System32 and no Visual C++ Redistributable registered);
-#   2. runs arn.exe from the extracted ZIP with only System32 on PATH: it must
-#      print exactly "arn <ExpectedVersion> (<commit>)";
-#   3. removes the packaged Visual C++ runtime DLLs from a copy and expects
-#      arn.exe to fail to start, which shows the package's own runtime files
-#      are what make it run;
-#   4. installs the package with scripts/install.ps1 (checksum verified),
-#      reinstalls it, and uninstalls it: the user PATH entry is added and
-#      removed, ARN's files are removed, and a user's own file in the
-#      installation directory is kept.
-# Needs Docker with Windows containers (GitHub's windows-2022 runners).
+#   2. checks that the package contains no Visual C++ runtime file, and that
+#      its arn.exe cannot start without the runtime;
+#   3. runs scripts/install.ps1: it must stop with Microsoft's download link
+#      and change nothing;
+#   4. as a user would, installs the Visual C++ Redistributable from
+#      Microsoft's link (the test does this, not ARN Code; the download must
+#      be signed by Microsoft);
+#   5. runs the packaged arn.exe ("arn <ExpectedVersion> (<commit>)"), then
+#      installs the package with install.ps1 (checksum verified), reinstalls
+#      it, refuses a wrong checksum, and uninstalls it: the user PATH entry is
+#      added and removed, ARN's files are removed, and a user's own file in
+#      the installation directory is kept. No step of ARN Code needs
+#      administrator rights; only the Redistributable's installer does.
+# Needs Docker with Windows containers (GitHub's windows-2022 runners) and
+# network access from the container to Microsoft's download.
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
@@ -43,17 +49,12 @@ try {
     $inner = @'
 param([string]$ExpectedLine)
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 $failures = New-Object System.Collections.Generic.List[string]
 function Fail([string]$Message) { $script:failures.Add($Message); Write-Host "FAIL: $Message" }
 $system = Join-Path $env:SystemRoot "System32"
 $runtime = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_atomic_wait.dll")
-
-# 1. A clean machine.
-$present = @($runtime | Where-Object { Test-Path -LiteralPath (Join-Path $system $_) })
-$registered = Test-Path "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
-if ($present.Count -or $registered) { throw "Not a clean machine: System32 has [$($present -join ', ')], Redistributable registered: $registered." }
-$os = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-Write-Host "ok: clean Windows ($($os.ProductName), build $($os.CurrentBuildNumber)): no Visual C++ runtime in System32, no Redistributable registered"
+$redistUrl = "https://aka.ms/vc14/vc_redist.x64.exe"
 
 function Invoke-Arn([string]$Exe) {
     $out = Join-Path $env:TEMP ([guid]::NewGuid().ToString("N"))
@@ -61,34 +62,60 @@ function Invoke-Arn([string]$Exe) {
     $text = if (Test-Path $out) { ([IO.File]::ReadAllText($out)).Trim() } else { "" }
     return @{ Code = $p.ExitCode; Text = $text }
 }
+function Invoke-Installer([hashtable]$Arguments) {
+    try { & C:\work\install.ps1 @Arguments | Out-Host; return $null } catch { return $_.Exception.Message }
+}
 
-# 2. The package as published.
+# 1. A clean machine.
+$present = @($runtime | Where-Object { Test-Path -LiteralPath (Join-Path $system $_) })
+$registered = (Test-Path "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64") -or
+              (Test-Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64")
+if ($present.Count -or $registered) { throw "Not a clean machine: System32 has [$($present -join ', ')], Redistributable registered: $registered." }
+$os = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+Write-Host "ok: clean Windows ($($os.ProductName), build $($os.CurrentBuildNumber)): no Visual C++ runtime in System32, no Redistributable registered"
+
+# 2. The package: no Visual C++ runtime inside, and arn.exe needs it.
 $pkg = "C:\t\package"
 Expand-Archive -LiteralPath C:\work\arn-windows-x64.zip -DestinationPath $pkg
+$shipped = @(Get-ChildItem -LiteralPath $pkg -File | Where-Object { $_.Name -match '^(vcruntime|msvcp|concrt|vccorlib|vcomp|vcamp|mfcm?)1[0-9]{2}' } | ForEach-Object Name)
+if ($shipped.Count) { Fail "the package contains the Visual C++ runtime: $($shipped -join ', ')" }
+else { Write-Host "ok: the package contains no Visual C++ runtime file ($(@(Get-ChildItem -LiteralPath $pkg -File | ForEach-Object Name) -join ', '))" }
 $env:Path = $system
 $r = Invoke-Arn (Join-Path $pkg "arn.exe")
-if ($r.Code -ne 0 -or $r.Text -cne $ExpectedLine) { Fail "packaged arn.exe: exit $($r.Code), '$($r.Text)', expected '$ExpectedLine'" }
-else { Write-Host "ok: packaged arn.exe runs on the clean machine: $($r.Text)" }
+if ($r.Code -eq 0) { Fail "arn.exe started without the Visual C++ runtime: '$($r.Text)'" }
+else { Write-Host ("ok: without the Visual C++ runtime the packaged arn.exe does not start (exit 0x{0:X8})" -f $r.Code) }
 
-# 3. Without the packaged Visual C++ runtime it cannot start.
-$bare = "C:\t\without-runtime"
-Copy-Item -LiteralPath $pkg -Destination $bare -Recurse
-$removed = @($runtime | Where-Object { Test-Path -LiteralPath (Join-Path $bare $_) })
-foreach ($name in $removed) { Remove-Item -LiteralPath (Join-Path $bare $name) }
-if (-not $removed.Count) { Fail "the package contains none of the Visual C++ runtime DLLs" }
-$r = Invoke-Arn (Join-Path $bare "arn.exe")
-if ($r.Code -eq 0) { Fail "arn.exe started without the packaged Visual C++ runtime ($($removed -join ', ')): '$($r.Text)'" }
-else { Write-Host ("ok: without the packaged {0} arn.exe does not start (exit 0x{1:X8})" -f ($removed -join ', '), $r.Code) }
-
-# 4. install.ps1: install, reinstall, uninstall.
+# 3. install.ps1 without the runtime: Microsoft's link, nothing changed.
 $dir = "C:\t\arn\bin"
-New-Item -ItemType Directory -Path $dir -Force | Out-Null
-[IO.File]::WriteAllText((Join-Path $dir "my-notes.txt"), "user data")
 $common = @{ ArchivePath = "C:\work\arn-windows-x64.zip"; ChecksumsPath = "C:\work\SHA256SUMS"; InstallDir = $dir; PathScope = "User" }
 function User-Path { [Environment]::GetEnvironmentVariable("Path", "User") }
 function In-UserPath { @((User-Path) -split ';' | Where-Object { $_.TrimEnd('\') -ieq $dir }).Count -gt 0 }
+$message = Invoke-Installer $common
+if (-not $message -or -not $message.Contains($redistUrl) -or -not $message.Contains("ARN Code was not installed.")) { Fail "install.ps1 without the runtime: '$message'" }
+elseif ((Test-Path -LiteralPath $dir) -or (In-UserPath)) { Fail "install.ps1 without the runtime changed $dir or the user PATH" }
+else { Write-Host "ok: without the runtime install.ps1 stops and changes nothing: $($message -replace "`r?`n", ' ')" }
+
+# 4. The user installs the Visual C++ Redistributable from Microsoft.
+$redist = Join-Path $env:TEMP "vc_redist.x64.exe"
+Invoke-WebRequest -UseBasicParsing -Uri $redistUrl -OutFile $redist
+$signature = Get-AuthenticodeSignature -LiteralPath $redist
+if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+    throw "The download from $redistUrl is not signed by Microsoft ($($signature.Status), $($signature.SignerCertificate.Subject))."
+}
+$p = Start-Process -FilePath $redist -ArgumentList "/install", "/quiet", "/norestart" -Wait -PassThru
+if ($p.ExitCode -notin 0, 3010) { throw "The Visual C++ Redistributable did not install (exit $($p.ExitCode))." }
+$version = (Get-Item -LiteralPath (Join-Path $system "msvcp140.dll")).VersionInfo.FileVersion
+Write-Host "ok: the Visual C++ Redistributable from Microsoft is installed (msvcp140.dll $version)"
+
+# 5. With the runtime: run, install, reinstall, wrong checksum, uninstall.
+$r = Invoke-Arn (Join-Path $pkg "arn.exe")
+if ($r.Code -ne 0 -or $r.Text -cne $ExpectedLine) { Fail "packaged arn.exe: exit $($r.Code), '$($r.Text)', expected '$ExpectedLine'" }
+else { Write-Host "ok: the packaged arn.exe runs: $($r.Text)" }
+New-Item -ItemType Directory -Path $dir -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $dir "my-notes.txt"), "user data")
 foreach ($round in "install", "reinstall") {
-    try { & C:\work\install.ps1 @common | Out-Host } catch { Fail "$round failed: $($_.Exception.Message)"; continue }
+    $message = Invoke-Installer $common
+    if ($message) { Fail "$round failed: $message"; continue }
     $r = Invoke-Arn (Join-Path $dir "arn.exe")
     if ($r.Code -ne 0 -or $r.Text -cne $ExpectedLine) { Fail "$round`: installed arn.exe printed '$($r.Text)' (exit $($r.Code))" }
     elseif (-not (Test-Path (Join-Path $dir "install-manifest.json"))) { Fail "$round`: no install-manifest.json" }
@@ -97,10 +124,11 @@ foreach ($round in "install", "reinstall") {
 }
 $bad = Join-Path $env:TEMP "BAD-SHA256SUMS"
 [IO.File]::WriteAllText($bad, ("0" * 64) + "  arn-windows-x64.zip`n")
-$refused = $false
-try { & C:\work\install.ps1 -ArchivePath C:\work\arn-windows-x64.zip -ChecksumsPath $bad -InstallDir "C:\t\other" -PathScope None | Out-Host } catch { $refused = $_.Exception.Message -match 'Checksum verification failed' }
-if (-not $refused -or (Test-Path "C:\t\other\arn.exe")) { Fail "a wrong checksum was not refused" } else { Write-Host "ok: a wrong checksum is refused and nothing is installed" }
-try { & C:\work\install.ps1 -Uninstall -InstallDir $dir | Out-Host } catch { Fail "uninstall failed: $($_.Exception.Message)" }
+$message = Invoke-Installer @{ ArchivePath = "C:\work\arn-windows-x64.zip"; ChecksumsPath = $bad; InstallDir = "C:\t\other"; PathScope = "None" }
+if (-not $message -or $message -notmatch 'Checksum verification failed' -or (Test-Path "C:\t\other\arn.exe")) { Fail "a wrong checksum was not refused: '$message'" }
+else { Write-Host "ok: a wrong checksum is refused and nothing is installed" }
+$message = Invoke-Installer @{ Uninstall = $true; InstallDir = $dir }
+if ($message) { Fail "uninstall failed: $message" }
 $left = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne "my-notes.txt" } | ForEach-Object { $_.Name })
 if ($left.Count) { Fail "uninstall left: $($left -join ', ')" }
 elseif (-not (Test-Path (Join-Path $dir "my-notes.txt"))) { Fail "uninstall removed the user's own file" }

@@ -191,9 +191,10 @@ jobs:
           done
 
   # The Windows CLI ZIP on a clean Windows: a Windows Server Core container
-  # has no Visual C++ runtime, developer tools or OpenSSL. The package must run
-  # there, must not run without its packaged runtime DLLs, and install.ps1 must
-  # install, reinstall and uninstall it.
+  # has no Visual C++ runtime, developer tools or OpenSSL. The package must not
+  # contain the Visual C++ runtime; install.ps1 must stop with Microsoft's link
+  # without it, and, once the Redistributable from Microsoft is installed,
+  # install, reinstall and uninstall the package.
   windows-clean-machine:
     name: Windows x64 package on a clean Windows
     needs: build

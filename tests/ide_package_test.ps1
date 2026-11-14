@@ -11,7 +11,8 @@ param(
 # resource; ide_fixture_dirty prints a "-dirty" commit; ide_fixture_old has
 # version 0.0.1. Valid packages pass; a wrong version or commit, a dirty
 # build, an older IDE, missing or empty files, an unexpected or nested entry
-# and a missing Visual C++ runtime DLL are rejected.
+# and a packaged Microsoft Visual C++ runtime (a prerequisite that users
+# install from Microsoft) are rejected. BuildDir is not used any more.
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression
@@ -29,15 +30,15 @@ foreach ($file in @($current, $dirty, $old)) {
 # Get-PeImports returns its list as one object; assigning it unrolls it.
 $fixtureImports = Get-PeImports $current
 if (@($fixtureImports | Where-Object { $_ -match '^(vcruntime140(_1)?d|msvcp140d|ucrtbased)' }).Count) {
-    Write-Host "skip: the fixtures are a Debug build; its debug Visual C++ runtime cannot be redistributed"
+    Write-Host "skip: the fixtures are a Debug build; they need the debug Visual C++ runtime, which no Redistributable installs"
     exit 77
 }
-$runtimeDir = Get-CMakeRuntimeDir (Resolve-Path -LiteralPath $BuildDir).Path
-if (-not $runtimeDir -or -not (Test-Path -LiteralPath (Join-Path $runtimeDir "vcruntime140.dll"))) {
-    throw "ARN_MSVC_RUNTIME_DIR is not set or not found ('$runtimeDir'); configure with MSVC."
-}
 $crt = @($fixtureImports | Where-Object { Test-VcRuntime $_ })
-if (-not $crt.Count) { throw "The fixture imports no Visual C++ runtime DLL; the missing-runtime case would test nothing." }
+if (-not $crt.Count) { throw "The fixture imports no Visual C++ runtime DLL; the prerequisite cases would test nothing." }
+# This machine's Visual C++ runtime (the Redistributable), used only to build
+# packages that wrongly contain it.
+$systemRuntime = Join-Path (Join-Path $env:SystemRoot "System32") $crt[0]
+if (-not (Test-Path -LiteralPath $systemRuntime)) { throw "$systemRuntime not found; install the Visual C++ Redistributable to run the fixtures." }
 
 $commit = "0123456789abcdef0123456789abcdef01234567"
 $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
@@ -53,7 +54,6 @@ function New-Layout([string]$Dir, [hashtable]$Changes = @{}) {
         'THIRD-PARTY-NOTICES.txt' = 'text:ARN Code - third-party notices'
         'THIRD-PARTY-NOTICES-IDE.txt' = 'text:ARN IDE for Windows - third-party notices'
     }
-    foreach ($dll in $crt) { $files[$dll] = Join-Path $runtimeDir $dll }
     foreach ($key in $Changes.Keys) { if ($null -eq $Changes[$key]) { $files.Remove($key) } else { $files[$key] = $Changes[$key] } }
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     foreach ($name in $files.Keys) {
@@ -115,10 +115,11 @@ try {
     Zip-Case "missing IDE third-party notices" @{ 'THIRD-PARTY-NOTICES-IDE.txt' = $null } $false "missing 'THIRD-PARTY-NOTICES-IDE.txt'"
     Zip-Case "missing CLI third-party notices" @{ 'THIRD-PARTY-NOTICES.txt' = $null } $false "missing 'THIRD-PARTY-NOTICES.txt'"
     Zip-Case "empty third-party notices" @{ 'THIRD-PARTY-NOTICES.txt' = 'empty' } $false "'THIRD-PARTY-NOTICES.txt' is empty"
-    Zip-Case "missing Visual C++ runtime" @{ $crt[0] = $null } $false "$($crt[0]) (Visual C++ runtime"
+    Zip-Case "packaged Visual C++ runtime" @{ $crt[0] = $systemRuntime } $false "The package contains the Microsoft Visual C++ runtime ($($crt[0])); it must not be shipped"
+    Zip-Case "packaged debug Visual C++ runtime" @{ 'vcruntime140d.dll' = 'text:not a real DLL' } $false "The package contains the Microsoft Visual C++ runtime (vcruntime140d.dll)"
     Zip-Case "unexpected file" @{ 'notes.txt' = 'text:extra' } $false "unexpected entry 'notes.txt'"
     Zip-Case "nested entry" @{ 'sub/arn.exe' = $current } $false "entry 'sub/arn.exe' is not a plain file name"
-    Zip-Case "unused DLL" @{ 'unused.dll' = (Join-Path $runtimeDir $crt[0]) } $false "Packaged DLLs that neither arn.exe nor arn-ide.exe uses: unused.dll"
+    Zip-Case "unused DLL" @{ 'unused.dll' = $current } $false "Packaged DLLs that neither arn.exe nor arn-ide.exe uses: unused.dll"
     Zip-Case "invalid expected commit" @{} $false "-ExpectedCommit must be 12-40 hexadecimal digits" -ExpectedCommit "abc"
 
     # Installer payload directories (7-Zip extraction of the NSIS setup).
@@ -129,6 +130,8 @@ try {
     Test-Case "installer payload without arn.exe" @{ Directory = $bad; ExpectedVersion = $Version; ExpectedCommit = $commit } $false "missing 'arn.exe'"
     $dirtyPayload = New-Layout (Join-Path $root "payload-dirty") @{ 'arn.exe' = $dirty }
     Test-Case "installer payload with a dirty build" @{ Directory = $dirtyPayload; ExpectedVersion = $Version; ExpectedCommit = $commit } $false "-dirty)"
+    $runtimePayload = New-Layout (Join-Path $root "payload-runtime") @{ $crt[0] = $systemRuntime }
+    Test-Case "installer payload with the Visual C++ runtime" @{ Directory = $runtimePayload; ExpectedVersion = $Version; ExpectedCommit = $commit } $false "must not be shipped"
 } finally {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }

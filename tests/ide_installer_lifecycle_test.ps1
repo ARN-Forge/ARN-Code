@@ -5,17 +5,25 @@ param(
     [Parameter(Mandatory = $true)][string]$ExpectedCommit
 )
 
-# Runs the Windows IDE installer through its whole life cycle, silently and
-# for the current user only, in a fresh directory:
-#   1. install: arn-ide.exe, the bundled arn.exe with its DLLs and both
-#      third-party notices files are installed; the bundled arn.exe prints
-#      "arn <ExpectedVersion> (<commit>)" with only System32 on PATH; the
-#      uninstaller is registered for the current user;
+# Checks the Windows IDE installer, then runs it through its whole life
+# cycle, silently and for the current user only, in a fresh directory:
+#   0. the installer itself (listed with 7-Zip): its data is compressed with
+#      NSIS's zlib module (Deflate), not the LZMA module, and its script checks
+#      for the Microsoft Visual C++ runtime DLLs and names Microsoft's
+#      download, https://aka.ms/vc14/vc_redist.x64.exe;
+#   1. install: arn-ide.exe, the bundled arn.exe with its OpenSSL DLLs and
+#      both third-party notices files are installed, and no Visual C++
+#      runtime file (a prerequisite, installed from Microsoft); the bundled
+#      arn.exe prints "arn <ExpectedVersion> (<commit>)" with only System32 on
+#      PATH; the uninstaller is registered for the current user;
 #   2. reinstall over the existing installation: the same files, still working;
 #   3. uninstall: the installation directory and the uninstall registration
 #      are gone, and a file the user keeps in the IDE's data directory is not
 #      touched.
-# The WebView2 Runtime is not installed by this test: GitHub's runners have it.
+# The WebView2 Runtime and the Visual C++ Redistributable are not installed
+# by this test: GitHub's runners have both. (Without the Visual C++ runtime
+# the installer stops before copying anything; GitHub's runners cannot show
+# that case, so step 0 checks the installer's script for it instead.)
 
 $ErrorActionPreference = "Stop"
 $Installer = (Resolve-Path -LiteralPath $Installer).Path
@@ -32,9 +40,11 @@ function Invoke-Silently([string]$Exe, [string[]]$Arguments) {
     return $p.ExitCode
 }
 function Test-Installation([string]$Round) {
-    $missing = @("arn-ide.exe", "arn.exe", "THIRD-PARTY-NOTICES.txt", "THIRD-PARTY-NOTICES-IDE.txt", "uninstall.exe",
-                 "vcruntime140.dll", "msvcp140.dll") | Where-Object { -not (Test-Path -LiteralPath (Join-Path $dir $_)) }
+    $missing = @("arn-ide.exe", "arn.exe", "THIRD-PARTY-NOTICES.txt", "THIRD-PARTY-NOTICES-IDE.txt", "uninstall.exe") |
+        Where-Object { -not (Test-Path -LiteralPath (Join-Path $dir $_)) }
     if ($missing.Count) { Fail "$Round`: missing $($missing -join ', ') in $dir"; return }
+    $runtime = @(Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -match '^(vcruntime|msvcp|concrt|vccorlib|vcomp|vcamp|mfcm?)1[0-9]{2}' } | ForEach-Object Name)
+    if ($runtime.Count) { Fail "$Round`: the Visual C++ runtime was installed: $($runtime -join ', ')"; return }
     $version = (Get-Item -LiteralPath (Join-Path $dir "arn-ide.exe")).VersionInfo.ProductVersion
     if ($version -ne $ExpectedVersion) { Fail "$Round`: arn-ide.exe is version '$version', expected $ExpectedVersion" }
     $oldPath = $env:Path
@@ -49,6 +59,24 @@ function Test-Installation([string]$Round) {
 }
 
 if (Test-Path -LiteralPath $uninstallKey) { throw "ARN IDE is already installed for this user ($uninstallKey); run this test on a machine without it." }
+
+# 0. The installer itself.
+$sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+if (-not $sevenZip) { throw "7-Zip (7z) is needed to inspect the installer." }
+$listing = (& $sevenZip l -slt $Installer | Out-String)
+$methods = @([regex]::Matches($listing, '(?m)^Method = (.+)$') | ForEach-Object { $_.Groups[1].Value.Trim() } | Sort-Object -Unique)
+if (@($methods | Where-Object { $_ -match 'LZMA|BZip2|PPMD' }).Count -or -not @($methods | Where-Object { $_ -match '^Deflate' }).Count) { Fail "the installer is not compressed with zlib (Deflate): methods $($methods -join ', ')" }
+else { Write-Host "ok: the installer uses NSIS's zlib compression (7-Zip: $($methods -join ', ')), not the LZMA module" }
+$scriptDir = Join-Path ([IO.Path]::GetTempPath()) ("arn-ide-installer-script-" + [guid]::NewGuid().ToString("N"))
+try {
+    & $sevenZip x $Installer "-o$scriptDir" '[NSIS].nsi' -y | Out-Null
+    $nsi = Join-Path $scriptDir '[NSIS].nsi'
+    $script = if (Test-Path -LiteralPath $nsi) { [IO.File]::ReadAllText($nsi) } else { "" }
+    $absent = @("https://aka.ms/vc14/vc_redist.x64.exe", "vcruntime140.dll", "msvcp140.dll") | Where-Object { $script.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -lt 0 }
+    if (-not $script) { Fail "7-Zip did not extract the installer's script" }
+    elseif ($absent.Count) { Fail "the installer's script lacks the Visual C++ runtime check ($($absent -join ', '))" }
+    else { Write-Host "ok: the installer checks for the Visual C++ runtime and names Microsoft's download" }
+} finally { Remove-Item -LiteralPath $scriptDir -Recurse -Force -ErrorAction SilentlyContinue }
 try {
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
     [IO.File]::WriteAllText($userFile, "user data")

@@ -34,6 +34,34 @@ try {
     [IO.File]::WriteAllText($checksums,
         "$((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant())  arn-windows-x64.zip`n")
 
+    # The package does not contain the Microsoft Visual C++ runtime; without it
+    # the installer stops before anything is looked up or changed, and names
+    # Microsoft's download. ARN_INSTALL_TEST_SYSTEM_DIR stands in for System32.
+    $runtimeDlls = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_atomic_wait.dll")
+    foreach ($case in @(@{ Name = "no Visual C++ runtime"; Present = @() },
+                        @{ Name = "an older Visual C++ runtime without msvcp140_atomic_wait.dll"; Present = $runtimeDlls[0..2] })) {
+        $fakeSystem = Join-Path $root ("system-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $fakeSystem | Out-Null
+        foreach ($dll in $case.Present) { [IO.File]::WriteAllText((Join-Path $fakeSystem $dll), "stand-in") }
+        $missing = @($runtimeDlls | Where-Object { $case.Present -notcontains $_ })
+        $refusal = $null
+        $env:ARN_INSTALL_TEST_SYSTEM_DIR = $fakeSystem
+        try {
+            & (Join-Path $repo "scripts/install.ps1") -InstallDir $installDir -ArchivePath $archive -ChecksumsPath $checksums -PathScope None
+        } catch {
+            $refusal = $_.Exception.Message
+        } finally {
+            Remove-Item Env:\ARN_INSTALL_TEST_SYSTEM_DIR
+        }
+        Assert-True ($null -ne $refusal) "With $($case.Name) the installer did not stop."
+        foreach ($fragment in @("Microsoft Visual C++ Redistributable", "https://aka.ms/vc14/vc_redist.x64.exe",
+                                "System32 has no $($missing -join ', ')", "ARN Code was not installed.")) {
+            Assert-True $refusal.Contains($fragment) "With $($case.Name) the message lacks '$fragment': $refusal"
+        }
+        Assert-True (-not (Test-Path -LiteralPath $installDir)) "With $($case.Name) the installer created $installDir."
+        Write-Host "ok: with $($case.Name) the installer stops with Microsoft's link and changes nothing"
+    }
+
     $oldPath = $env:Path
     try {
         $env:Path = Join-Path $env:SystemRoot "System32"
