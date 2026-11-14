@@ -60,8 +60,17 @@ which it does not ship. If it is missing, the installer stops before changing
 anything and shows Microsoft's link, <https://aka.ms/vc14/vc_redist.x64.exe>:
 install it (this needs administrator rights) and run the installer again.
 
-This installs the latest **stable** release. There is no Windows build of the
-v0.9.0 prerelease (see [Versions, prereleases and downgrades](#versions-prereleases-and-downgrades)).
+This installs the latest **stable** release. The latest stable release, v0.8.0,
+has no checksum for its Windows archive, so on Windows this command currently
+stops before downloading anything. Install the **v0.9.1 prerelease** instead,
+the first release with the Windows CLI since v0.8.0 (see
+[Versions, prereleases and downgrades](#versions-prereleases-and-downgrades)):
+
+```powershell
+$env:ARN_VERSION = "0.9.1"
+irm https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.ps1 | iex
+Remove-Item Env:\ARN_VERSION
+```
 
 To install a specific release instead, set `ARN_VERSION` first (`X.Y.Z` and
 `vX.Y.Z` both select tag `vX.Y.Z`); the release must have a Windows package and
@@ -99,27 +108,26 @@ This installs the latest **stable** release.
 Without `ARN_VERSION`, both install scripts install the latest stable release
 and never pick a prerelease.
 
-**v0.9.0 is a prerelease for Linux x64 and macOS (Apple Silicon and Intel)
-only.** It is not the latest stable release, and the commands above do not
-install it. To try it, name it explicitly:
+**v0.9.1 is a prerelease of the command-line `arn` for Windows x64, Linux x64
+and macOS (Apple Silicon and Intel).** It is not the latest stable release,
+and the commands above do not install it. To try it, name it explicitly (on
+Windows, see the [Windows](#windows) section):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.sh | ARN_VERSION=0.9.0 sh
+curl -fsSL https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.sh | ARN_VERSION=0.9.1 sh
 ```
 
-Put `ARN_VERSION=0.9.0` after the `|`, directly before `sh`: written before
+Put `ARN_VERSION=0.9.1` after the `|`, directly before `sh`: written before
 `curl` it does not reach the installer, which then installs the latest stable
 release instead.
 
-The v0.9.0 prerelease has no Windows CLI or Windows IDE package. Those packages
-include Microsoft Visual C++ runtime files, and their redistribution has not
-been cleared yet; no date is set. On Windows, `ARN_VERSION=0.9.0` stops with
-"no build for Windows x64" and changes nothing.
+The v0.9.1 prerelease does not include the Windows IDE; it will be released
+separately. The earlier v0.9.0 prerelease has no Windows packages at all.
 
 **Downgrades.** The installers never replace an installed version with an older
 one unless you allow it with `ARN_ALLOW_DOWNGRADE=1` (no other value is
 accepted). Naming the older version with `ARN_VERSION` is not enough. For
-example, to go back from the v0.9.0 prerelease to the latest stable release:
+example, to go back from the v0.9.1 prerelease to the latest stable release:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.sh | ARN_ALLOW_DOWNGRADE=1 sh
@@ -325,8 +333,8 @@ Download an archive from the [latest release page](https://github.com/ARN-Forge/
 (the latest stable release), extract it, and keep its files together so the
 executable can find its bundled runtime libraries. Prereleases are listed on
 the [releases page](https://github.com/ARN-Forge/ARN-Code/releases) and are
-marked as such; the v0.9.0 prerelease contains only the Linux and macOS
-archives.
+marked as such; the v0.9.1 prerelease contains the Windows, Linux and macOS
+CLI archives, but not the Windows IDE.
 
 A release contains some or all of these archives:
 
@@ -338,8 +346,8 @@ A release contains some or all of these archives:
 - **macOS Apple Silicon CLI:** `arn-macos-arm64.tar.gz`
 - **macOS Intel CLI:** `arn-macos-x64.tar.gz`
 
-The Windows packages that the current release workflow builds are not part of
-the v0.9.0 prerelease (see above). As built, they need the **Microsoft Visual
+The Windows CLI archive is part of the v0.9.1 prerelease; the Windows IDE
+packages are not released yet. The Windows packages need the **Microsoft Visual
 C++ Redistributable (x64)** on Windows 10 or 11 x64. ARN Code does not ship
 the Visual C++ runtime: install it once from Microsoft,
 <https://aka.ms/vc14/vc_redist.x64.exe> (installing it needs administrator
@@ -596,6 +604,6 @@ automatic model routing, and isolated subagents remain planned concepts.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow,
 [SECURITY.md](SECURITY.md) for vulnerability reporting, and
-[docs/releases/v0.9.0.md](docs/releases/v0.9.0.md) for the v0.9.0 release
+[docs/releases/v0.9.1.md](docs/releases/v0.9.1.md) for the v0.9.1 release
 notes (earlier releases are in [docs/releases](docs/releases)). The project is
 released under the [MIT License](LICENSE).
