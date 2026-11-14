@@ -1,13 +1,29 @@
 name: Release
 
+# Two steps, never one:
+#   1. Pushing a vX.Y.Z tag builds the packages that release/platforms.json
+#      (the release platform policy in the tagged commit) names, and creates a
+#      DRAFT release with exactly those assets and their SHA256SUMS. Nothing is
+#      public yet.
+#   2. Publishing is a separate, manual run: "Run workflow" on the same tag
+#      with "publish_draft" checked. It checks the draft again (assets,
+#      checksums, prerelease flag) and only then publishes it, as a prerelease
+#      and not the latest release when the policy says so.
+# A release or draft that already exists for the tag is never replaced or
+# added to: step 1 stops, and the draft has to be removed by hand to retry.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish_draft:
+        description: "Publish the checked draft release of this tag (run on the tag)"
+        type: boolean
+        default: false
 
 # Read-only by default: the build jobs run third-party build tools (npm, cargo,
-# vcpkg, Homebrew) and must not hold a token that can write. Only the release
-# job, which creates the GitHub release, gets contents: write.
+# vcpkg, Homebrew) and must not hold a token that can write. Only the draft
+# and publish jobs, which write the GitHub release, get contents: write.
 #
 # Third-party actions are pinned to full commit SHAs of the official
 # repositories (the comment names the release the SHA belongs to), and the
@@ -20,54 +36,50 @@ permissions:
   contents: read
 
 # One release run per tag at a time: a manual run on a tag while the push run
-# for it is still going would otherwise publish the same release twice.
+# for it is still going would otherwise work on the same release twice.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  # Runs before any build. Fails unless this run is for a vX.Y.Z tag that
-  # matches the CLI and IDE versions and has release notes, so a manual run on
-  # a branch such as main can never publish a release named after the branch.
+  # Runs before anything else. Fails unless this run is for a vX.Y.Z tag that
+  # matches the CLI and IDE versions, has release notes and a valid platform
+  # policy for this version, so a manual run on a branch such as main can never
+  # publish a release named after the branch. Its outputs are the policy: what
+  # to build, the exact assets, and how the release is marked.
   preflight:
     name: Release preflight
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      build_matrix: ${{ steps.policy.outputs.build_matrix }}
+      windows_ide: ${{ steps.policy.outputs.windows_ide }}
+      expected: ${{ steps.policy.outputs.expected }}
+      prerelease: ${{ steps.policy.outputs.prerelease }}
+      make_latest: ${{ steps.policy.outputs.make_latest }}
+      platforms: ${{ steps.policy.outputs.platforms }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Check tag, versions and release notes
+      - name: Check tag, versions, release notes and platform policy
+        id: policy
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
-        run: cmake "-DREF_TYPE=$REF_TYPE" "-DREF_NAME=$REF_NAME" -P scripts/release-preflight.cmake
+        run: >-
+          cmake "-DREF_TYPE=$REF_TYPE" "-DREF_NAME=$REF_NAME" "-DOUTPUT_FILE=$GITHUB_OUTPUT"
+          -P scripts/release-preflight.cmake
 
+  # The CLI packages the policy names, and only those: the matrix is the
+  # policy's, not a fixed list.
   build:
     name: Package ${{ matrix.name }}
     needs: preflight
+    if: ${{ !inputs.publish_draft }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: Windows x64
-            os: windows-latest
-            artifact: arn-windows-x64
-            archive: arn-windows-x64.zip
-          # A fixed image, not ubuntu-latest: the build's glibc and libstdc++
-          # set the oldest distribution the binary runs on (checked below).
-          - name: Linux x64
-            os: ubuntu-24.04
-            artifact: arn-linux-x64
-            archive: arn-linux-x64.tar.gz
-          - name: macOS arm64
-            os: macos-latest
-            artifact: arn-macos-arm64
-            archive: arn-macos-arm64.tar.gz
-          - name: macOS x64
-            os: macos-15-intel
-            artifact: arn-macos-x64
-            archive: arn-macos-x64.tar.gz
+      matrix: ${{ fromJSON(needs.preflight.outputs.build_matrix) }}
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -176,9 +188,11 @@ jobs:
           path: ${{ matrix.archive }}
           if-no-files-found: error
 
+  # Only when the policy names windows-ide-x64.
   ide-windows:
     name: Package Windows IDE
     needs: preflight
+    if: ${{ !inputs.publish_draft && needs.preflight.outputs.windows_ide == 'true' }}
     runs-on: windows-latest
     env:
       CARGO_BUILD_JOBS: '1'
@@ -271,17 +285,40 @@ jobs:
             arn-ide-windows-x64-setup.exe
           if-no-files-found: error
 
-  release:
-    name: Publish GitHub release
+  # Step 1: a draft release with exactly the policy's assets. It runs only when
+  # the preflight passed and every package the policy names was built: the
+  # Windows IDE job may be skipped only because the policy leaves it out.
+  draft:
+    name: Create draft release
     needs: [preflight, build, ide-windows]
-    # Defence in depth: preflight already refuses non-tag runs.
-    if: github.ref_type == 'tag'
+    if: >-
+      ${{ !cancelled() && !inputs.publish_draft && github.ref_type == 'tag' &&
+          needs.preflight.result == 'success' && needs.build.result == 'success' &&
+          (needs.ide-windows.result == 'success' ||
+           (needs.ide-windows.result == 'skipped' && needs.preflight.outputs.windows_ide != 'true')) }}
     runs-on: ubuntu-latest
-    # The only job that writes: it creates the release and uploads its assets.
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      EXPECTED: ${{ needs.preflight.outputs.expected }}
+      PLATFORMS: ${{ needs.preflight.outputs.platforms }}
+      PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # A rerun must not add to or replace a release, published or draft.
+      - name: Refuse to touch an existing release
+        run: |
+          existing="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+            --jq '.[] | select(.tag_name == env.TAG) | "\(.id) draft=\(.draft)"')"
+          if [ -n "$existing" ]; then
+            echo "::error::A release for $TAG already exists ($existing). It is never replaced or added to; delete the draft by hand to build it again."
+            exit 1
+          fi
+
       # One directory per artifact, so two artifacts with the same file name
       # cannot silently overwrite each other; release-checksums.cmake rejects it.
       - name: Download packages
@@ -290,21 +327,107 @@ jobs:
           pattern: release-*
           path: artifacts
 
-      # Exactly these assets are published, each listed once in SHA256SUMS.
+      # Exactly the policy's assets, each listed once in SHA256SUMS; anything
+      # else (a Windows package the policy leaves out included) fails here.
       - name: Collect assets and write SHA256SUMS
-        run: >-
-          cmake -DARTIFACTS_DIR=artifacts -DDIST_DIR=dist
-          "-DEXPECTED=arn-windows-x64.zip;arn-linux-x64.tar.gz;arn-macos-arm64.tar.gz;arn-macos-x64.tar.gz;arn-ide-windows-x64.zip;arn-ide-windows-x64-setup.exe"
-          -P scripts/release-checksums.cmake
+        run: cmake -DARTIFACTS_DIR=artifacts -DDIST_DIR=dist "-DEXPECTED=$EXPECTED" -P scripts/release-checksums.cmake
+
+      # Defence in depth for the policy's Windows exclusion.
+      - name: Check that no left-out Windows package is present
+        run: |
+          case ",$PLATFORMS," in *,windows-x64,*) cli=1 ;; *) cli=0 ;; esac
+          case ",$PLATFORMS," in *,windows-ide-x64,*) ide=1 ;; *) ide=0 ;; esac
+          for file in dist/*; do
+            name="${file##*/}"
+            case "$name" in
+              arn-ide-windows-*) [ "$ide" = 1 ] || { echo "::error::$name is not in this release's policy."; exit 1; } ;;
+              *windows*) [ "$cli" = 1 ] || { echo "::error::$name is not in this release's policy."; exit 1; } ;;
+            esac
+          done
 
       # An independent implementation must agree with every manifest line.
       - name: Check SHA256SUMS with sha256sum
         working-directory: dist
         run: sha256sum --check --strict SHA256SUMS
 
-      - name: Publish GitHub release
+      - name: Create draft release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
+          draft: true
+          prerelease: ${{ needs.preflight.outputs.prerelease }}
+          make_latest: ${{ needs.preflight.outputs.make_latest }}
+          overwrite_files: false
+          fail_on_unmatched_files: true
           body_path: docs/releases/${{ github.ref_name }}.md
           generate_release_notes: true
           files: dist/*
+
+      - name: Check the draft
+        run: |
+          releases="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name == env.TAG)' | jq -s .)"
+          [ "$(echo "$releases" | jq length)" = 1 ] || { echo "::error::Expected exactly one release for $TAG."; exit 1; }
+          [ "$(echo "$releases" | jq '.[0].draft')" = true ] || { echo "::error::The release for $TAG is not a draft."; exit 1; }
+          [ "$(echo "$releases" | jq '.[0].prerelease')" = "$PRERELEASE" ] || { echo "::error::The draft's prerelease flag is not $PRERELEASE."; exit 1; }
+          actual="$(echo "$releases" | jq -r '.[0].assets[].name' | LC_ALL=C sort)"
+          wanted="$( { echo "$EXPECTED" | tr ';' '\n'; echo SHA256SUMS; } | LC_ALL=C sort)"
+          if [ "$actual" != "$wanted" ]; then
+            echo "::error::The draft's assets differ from the policy."
+            diff <(echo "$wanted") <(echo "$actual") || true
+            exit 1
+          fi
+          echo "Draft release for $TAG is ready: prerelease=$PRERELEASE, assets: $(echo $actual)."
+          echo "Publish it with: Run workflow on $TAG, publish_draft checked."
+
+  # Step 2, started by hand on the tag with publish_draft checked: checks the
+  # draft once more, publishes it as the policy says, and checks the result.
+  publish:
+    name: Publish the draft release
+    needs: preflight
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_draft && github.ref_type == 'tag' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      EXPECTED: ${{ needs.preflight.outputs.expected }}
+      PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+      MAKE_LATEST: ${{ needs.preflight.outputs.make_latest }}
+    steps:
+      - name: Check the draft and its assets
+        run: |
+          releases="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name == env.TAG)' | jq -s .)"
+          [ "$(echo "$releases" | jq length)" = 1 ] || { echo "::error::Expected exactly one release for $TAG."; exit 1; }
+          [ "$(echo "$releases" | jq '.[0].draft')" = true ] || { echo "::error::The release for $TAG is not a draft; nothing to publish."; exit 1; }
+          [ "$(echo "$releases" | jq '.[0].prerelease')" = "$PRERELEASE" ] || { echo "::error::The draft's prerelease flag is not $PRERELEASE."; exit 1; }
+          actual="$(echo "$releases" | jq -r '.[0].assets[].name' | LC_ALL=C sort)"
+          wanted="$( { echo "$EXPECTED" | tr ';' '\n'; echo SHA256SUMS; } | LC_ALL=C sort)"
+          [ "$actual" = "$wanted" ] || { echo "::error::The draft's assets differ from the policy."; diff <(echo "$wanted") <(echo "$actual") || true; exit 1; }
+          mkdir draft
+          gh release download "$TAG" --dir draft
+          cd draft
+          listed="$(awk '{ print $2 }' SHA256SUMS | LC_ALL=C sort)"
+          [ "$listed" = "$(echo "$EXPECTED" | tr ';' '\n' | LC_ALL=C sort)" ] || { echo "::error::SHA256SUMS does not list exactly the policy's assets."; exit 1; }
+          sha256sum --check --strict SHA256SUMS
+
+      - name: Publish
+        run: gh release edit "$TAG" --draft=false "--prerelease=$PRERELEASE" "--latest=$MAKE_LATEST"
+
+      # After publication: marked as the policy says, and a prerelease is not
+      # the latest release.
+      - name: Check the published release
+        run: |
+          release="$(gh api "repos/$GH_REPO/releases/tags/$TAG")"
+          [ "$(echo "$release" | jq '.draft')" = false ] || { echo "::error::$TAG is still a draft."; exit 1; }
+          [ "$(echo "$release" | jq '.prerelease')" = "$PRERELEASE" ] || { echo "::error::$TAG prerelease flag is not $PRERELEASE."; exit 1; }
+          latest="$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name || echo none)"
+          if [ "$MAKE_LATEST" = false ] && [ "$latest" = "$TAG" ]; then
+            echo "::error::$TAG became the latest release, but its policy says it must not."
+            exit 1
+          fi
+          if [ "$MAKE_LATEST" = true ] && [ "$latest" != "$TAG" ]; then
+            echo "::error::$TAG should be the latest release, but the latest is $latest."
+            exit 1
+          fi
+          echo "$TAG published: prerelease=$PRERELEASE; the latest release is $latest."

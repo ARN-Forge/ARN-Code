@@ -1,0 +1,7 @@
+{
+  "format": "arn-release-platforms/1",
+  "version": "0.9.0",
+  "platforms": ["linux-x64", "macos-arm64", "macos-x64"],
+  "prerelease": true,
+  "reason": "Windows CLI and IDE packages are withheld until redistribution of the Microsoft Visual C++ runtime they include has been cleared."
+}

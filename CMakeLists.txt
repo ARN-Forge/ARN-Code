@@ -349,6 +349,15 @@ if (BUILD_TESTING)
                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/test-release-checksums"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_checksums_test.cmake")
     set_tests_properties(release_checksums PROPERTIES TIMEOUT 60)
+    # .github/workflows/release.yml follows release/platforms.json and fails
+    # closed (static checks; a publication cannot run in a test).
+    add_test(NAME release_workflow
+        COMMAND ${CMAKE_COMMAND}
+                "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+                "-DPROJECT_VERSION=${PROJECT_VERSION}"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/test-release-workflow"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_workflow_test.cmake")
+    set_tests_properties(release_workflow PROPERTIES TIMEOUT 60)
     add_executable(architecture_test tests/architecture_test.cpp)
     if (TARGET arn_core)
         get_target_property(ARN_CORE_SOURCE_DIR_PROP arn_core SOURCE_DIR)
@@ -458,7 +467,7 @@ if (BUILD_TESTING)
         tui_renderer normal_chat)
     set_tests_properties(${_arn_unit_tests} PROPERTIES LABELS unit TIMEOUT 60)
     set(_arn_integration_tests acp_client acp_session acp_subprocess
-        build_identity version_output release_preflight release_checksums)
+        build_identity version_output release_preflight release_checksums release_workflow)
     if (Python3_FOUND)
         list(APPEND _arn_integration_tests server_protocol)
     endif()

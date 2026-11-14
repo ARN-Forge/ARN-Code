@@ -2,7 +2,7 @@
 # built. Run by .github/workflows/release.yml and by tests/release_preflight_test.cmake.
 #
 #   cmake -DREF_TYPE=<tag|branch> -DREF_NAME=<name> [-DREPO_ROOT=<dir>]
-#         -P scripts/release-preflight.cmake
+#         [-DOUTPUT_FILE=<file>] -P scripts/release-preflight.cmake
 #
 # Requirements:
 #   - the run is for a Git tag (a manual run on a branch such as main must not
@@ -11,8 +11,26 @@
 #   - X.Y.Z equals project(VERSION) in CMakeLists.txt and the IDE versions in
 #     ide/package.json, ide/package-lock.json, ide/src-tauri/tauri.conf.json,
 #     ide/src-tauri/Cargo.toml and ide/src-tauri/Cargo.lock;
-#   - docs/releases/vX.Y.Z.md exists and is not empty.
+#   - docs/releases/vX.Y.Z.md exists and is not empty;
+#   - release/platforms.json, the release platform policy, is valid for X.Y.Z
+#     (see below).
 # Every problem is reported; the script then fails once.
+#
+# The release platform policy (release/platforms.json) states which packages
+# this release publishes; nothing is inferred from which jobs happen to run:
+#   { "format": "arn-release-platforms/1",
+#     "version": "X.Y.Z",                    the tag's version, so a policy is
+#                                            never carried over by accident
+#     "platforms": ["linux-x64", ...],       at least one CLI platform, each
+#                                            once, from the table below
+#     "prerelease": true|false,              must be true unless every
+#                                            platform is listed
+#     "reason": "..." }                      why platforms are missing;
+#                                            required when any is
+# With OUTPUT_FILE (the workflow passes $GITHUB_OUTPUT), the policy is written
+# there as key=value lines: build_matrix (the CLI packages to build, as a
+# matrix), windows_ide, expected (the release assets, ;-separated),
+# prerelease and make_latest (true/false), and platforms.
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -130,6 +148,96 @@ else()
     endif()
 endif()
 
+# 6. Release platform policy. Every known platform: its packaging job and the
+# release assets it produces. CLI platforms are built by the "build" matrix
+# (name, runner image, artifact name, archive); windows-ide-x64 by the
+# "ide-windows" job. Linux uses a fixed image, not ubuntu-latest: the build's
+# glibc and libstdc++ set the oldest distribution the binary runs on.
+set(_known_platforms windows-x64 linux-x64 macos-arm64 macos-x64 windows-ide-x64)
+set(_cli_windows-x64 "Windows x64|windows-latest|arn-windows-x64|arn-windows-x64.zip")
+set(_cli_linux-x64 "Linux x64|ubuntu-24.04|arn-linux-x64|arn-linux-x64.tar.gz")
+set(_cli_macos-arm64 "macOS arm64|macos-latest|arn-macos-arm64|arn-macos-arm64.tar.gz")
+set(_cli_macos-x64 "macOS x64|macos-15-intel|arn-macos-x64|arn-macos-x64.tar.gz")
+set(_ide_assets "arn-ide-windows-x64.zip;arn-ide-windows-x64-setup.exe")
+
+set(_policy_file "release/platforms.json")
+set(_platforms "")
+set(_prerelease "")
+_preflight_read("${_policy_file}" _policy)
+if (NOT _policy STREQUAL "")
+    string(JSON _policy_type ERROR_VARIABLE _policy_error TYPE "${_policy}")
+    if (_policy_error OR NOT _policy_type STREQUAL "OBJECT")
+        _preflight_error("${_policy_file} is not a JSON object.")
+    else()
+        string(JSON _format ERROR_VARIABLE _e GET "${_policy}" format)
+        if (_e OR NOT _format STREQUAL "arn-release-platforms/1")
+            _preflight_error("${_policy_file} must have \"format\": \"arn-release-platforms/1\".")
+        endif()
+        string(JSON _policy_version ERROR_VARIABLE _e GET "${_policy}" version)
+        if (_e)
+            _preflight_error("${_policy_file} has no \"version\".")
+        elseif (NOT _policy_version STREQUAL _version)
+            _preflight_error("${_policy_file} is the policy for ${_policy_version}, but the tag is ${REF_NAME}; write the policy for this release.")
+        endif()
+        string(JSON _list_type ERROR_VARIABLE _e TYPE "${_policy}" platforms)
+        if (_e OR NOT _list_type STREQUAL "ARRAY")
+            _preflight_error("${_policy_file} has no \"platforms\" list.")
+        else()
+            string(JSON _count LENGTH "${_policy}" platforms)
+            if (_count EQUAL 0)
+                _preflight_error("${_policy_file} lists no platforms.")
+            else()
+                math(EXPR _last "${_count} - 1")
+                foreach(_i RANGE ${_last})
+                    string(JSON _item_type TYPE "${_policy}" platforms ${_i})
+                    string(JSON _item GET "${_policy}" platforms ${_i})
+                    if (NOT _item_type STREQUAL "STRING" OR NOT _item IN_LIST _known_platforms)
+                        _preflight_error("${_policy_file} lists '${_item}', which is not one of: ${_known_platforms}.")
+                    elseif (_item IN_LIST _platforms)
+                        _preflight_error("${_policy_file} lists '${_item}' twice.")
+                    else()
+                        list(APPEND _platforms "${_item}")
+                    endif()
+                endforeach()
+            endif()
+        endif()
+        string(JSON _pre_type ERROR_VARIABLE _e TYPE "${_policy}" prerelease)
+        if (_e OR NOT _pre_type STREQUAL "BOOLEAN")
+            _preflight_error("${_policy_file} must have \"prerelease\": true or false.")
+        else()
+            string(JSON _prerelease GET "${_policy}" prerelease)
+        endif()
+        string(JSON _reason ERROR_VARIABLE _reason_error GET "${_policy}" reason)
+        if (_reason_error)
+            set(_reason "")
+        endif()
+        string(STRIP "${_reason}" _reason)
+    endif()
+endif()
+
+set(_missing "")
+foreach(_platform IN LISTS _known_platforms)
+    if (NOT _platform IN_LIST _platforms)
+        list(APPEND _missing "${_platform}")
+    endif()
+endforeach()
+list(JOIN _missing ", " _missing_text)
+set(_cli_count 0)
+foreach(_platform IN LISTS _platforms)
+    if (DEFINED _cli_${_platform})
+        math(EXPR _cli_count "${_cli_count} + 1")
+    endif()
+endforeach()
+if (_platforms AND _cli_count EQUAL 0)
+    _preflight_error("${_policy_file} lists no CLI platform; a release must publish at least one CLI package.")
+endif()
+if (_missing AND _prerelease STREQUAL "OFF")
+    _preflight_error("${_policy_file} leaves out ${_missing_text}, so the release is incomplete and must have \"prerelease\": true; an incomplete release is never published as the latest stable release.")
+endif()
+if (_missing AND _platforms AND _reason STREQUAL "")
+    _preflight_error("${_policy_file} leaves out ${_missing_text} but gives no \"reason\".")
+endif()
+
 list(FILTER _errors EXCLUDE REGEX "^$")
 if (_errors)
     set(_report "Release preflight failed for ${REF_NAME}:")
@@ -138,4 +246,59 @@ if (_errors)
     endforeach()
     message(FATAL_ERROR "${_report}")
 endif()
-message(STATUS "Release preflight passed: ${REF_NAME} matches the CLI and IDE versions, and its release notes exist.")
+
+# The policy, for the workflow: the build matrix and the exact release assets
+# (in the fixed order of the table above, whatever the policy's order), and
+# how the release is marked.
+set(_matrix "")
+set(_expected "")
+foreach(_platform IN LISTS _known_platforms)
+    if (NOT _platform IN_LIST _platforms)
+        continue()
+    endif()
+    if (DEFINED _cli_${_platform})
+        string(REPLACE "|" ";" _fields "${_cli_${_platform}}")
+        list(GET _fields 0 _name)
+        list(GET _fields 1 _os)
+        list(GET _fields 2 _artifact)
+        list(GET _fields 3 _archive)
+        if (NOT _matrix STREQUAL "")
+            string(APPEND _matrix ",")
+        endif()
+        string(APPEND _matrix "{\"name\":\"${_name}\",\"os\":\"${_os}\",\"artifact\":\"${_artifact}\",\"archive\":\"${_archive}\"}")
+        list(APPEND _expected "${_archive}")
+    else()
+        list(APPEND _expected ${_ide_assets})
+    endif()
+endforeach()
+if ("windows-ide-x64" IN_LIST _platforms)
+    set(_windows_ide true)
+else()
+    set(_windows_ide false)
+endif()
+if (_prerelease STREQUAL "ON")
+    set(_pre true)
+    set(_latest false)
+else()
+    set(_pre false)
+    set(_latest true)
+endif()
+list(JOIN _platforms "," _platform_text)
+if (OUTPUT_FILE)
+    file(APPEND "${OUTPUT_FILE}"
+        "build_matrix={\"include\":[${_matrix}]}\n"
+        "windows_ide=${_windows_ide}\n"
+        "expected=${_expected}\n"
+        "prerelease=${_pre}\n"
+        "make_latest=${_latest}\n"
+        "platforms=${_platform_text}\n")
+endif()
+if (_missing)
+    set(_kind "a prerelease of ${_platform_text} only (left out: ${_missing_text}. ${_reason})")
+elseif (_pre)
+    set(_kind "a complete prerelease")
+else()
+    set(_kind "a complete release, published as the latest release")
+endif()
+message(STATUS "Release preflight passed: ${REF_NAME} matches the CLI and IDE versions, its release notes exist, "
+               "and it is ${_kind}. Assets: ${_expected}.")

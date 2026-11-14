@@ -55,18 +55,20 @@ The installer uses `%LOCALAPPDATA%\Arn\bin`, adds it to your user `PATH`, and
 verifies the installed executable. Open a new terminal if `arn` is not yet
 visible in another terminal window.
 
-To install a specific release instead of the latest, set `ARN_VERSION` first
-(`0.9.0` and `v0.9.0` both select tag `v0.9.0`). This works for v0.9.0 and
-later; earlier releases have no `SHA256SUMS` (see
-[Release checksums](#release-checksums)).
+This installs the latest **stable** release. There is no Windows build of the
+v0.9.0 prerelease (see [Versions, prereleases and downgrades](#versions-prereleases-and-downgrades)).
+
+To install a specific release instead, set `ARN_VERSION` first (`X.Y.Z` and
+`vX.Y.Z` both select tag `vX.Y.Z`); the release must have a Windows package and
+a `SHA256SUMS` (see [Release checksums](#release-checksums)):
 
 ```powershell
-$env:ARN_VERSION = "0.9.0"
+$env:ARN_VERSION = "X.Y.Z"
 irm https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.ps1 | iex
 Remove-Item Env:\ARN_VERSION
 ```
 
-A downloaded copy of the script also takes `-Version 0.9.0`.
+A downloaded copy of the script also takes `-Version X.Y.Z`.
 
 ### Linux and macOS
 
@@ -85,11 +87,54 @@ with Homebrew's `openssl@3`; Linux x64 with glibc 2.39 or later, the
 libstdc++ of GCC 13 or later and OpenSSL 3 (for example Ubuntu 24.04 or
 Debian 13; Ubuntu 22.04 and Debian 12 are too old).
 
-To install a specific release (v0.9.0 or later) instead of the latest:
+This installs the latest **stable** release.
+
+### Versions, prereleases and downgrades
+
+Without `ARN_VERSION`, both install scripts install the latest stable release
+and never pick a prerelease.
+
+**v0.9.0 is a prerelease for Linux x64 and macOS (Apple Silicon and Intel)
+only.** It is not the latest stable release, and the commands above do not
+install it. To try it, name it explicitly:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.sh | ARN_VERSION=0.9.0 sh
 ```
+
+Put `ARN_VERSION=0.9.0` after the `|`, directly before `sh`: written before
+`curl` it does not reach the installer, which then installs the latest stable
+release instead.
+
+The v0.9.0 prerelease has no Windows CLI or Windows IDE package. Those packages
+include Microsoft Visual C++ runtime files, and their redistribution has not
+been cleared yet; no date is set. On Windows, `ARN_VERSION=0.9.0` stops with
+"no build for Windows x64" and changes nothing.
+
+**Downgrades.** The installers never replace an installed version with an older
+one unless you allow it with `ARN_ALLOW_DOWNGRADE=1` (no other value is
+accepted). Naming the older version with `ARN_VERSION` is not enough. For
+example, to go back from the v0.9.0 prerelease to the latest stable release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.sh | ARN_ALLOW_DOWNGRADE=1 sh
+```
+
+```powershell
+$env:ARN_ALLOW_DOWNGRADE = "1"
+irm https://raw.githubusercontent.com/ARN-Forge/ARN-Code/main/scripts/install.ps1 | iex
+Remove-Item Env:\ARN_ALLOW_DOWNGRADE
+```
+
+The installer prints a warning when it downgrades. Without the variable it
+stops without changing anything, names both versions and shows the command to
+run.
+
+**When nothing can be installed.** If the latest stable release has no package
+for your platform or no `SHA256SUMS`, the installer does not fall back to an
+older release by itself: it installs nothing and prints the command for the
+newest release it could install (and for a newer prerelease, if there is one),
+for you to run if you want it.
 
 ### Updating
 
@@ -240,12 +285,13 @@ directory from your user `PATH` (Windows) or the two
 
 ### Release checksums
 
-Every release publishes `SHA256SUMS`, a list of the SHA-256 of each release
-file. Both install scripts download it from the same release as the archive
-and check the archive against it before extracting or running anything. If
-`SHA256SUMS` is missing, malformed, lacks or repeats the archive's entry, or
-the hash differs, nothing is installed. Releases published before
-`SHA256SUMS` existed (v0.8.0 and earlier) cannot be installed by these scripts.
+Releases from v0.9.0 on publish `SHA256SUMS`, a list of the SHA-256 of each
+release file. Earlier releases may not have one. Both install scripts download
+it from the same release as the archive and check the archive against it
+before extracting or running anything. If `SHA256SUMS` is missing, malformed,
+lacks or repeats the archive's entry, or the hash differs, nothing is
+installed, so a release without `SHA256SUMS` cannot be installed with these
+scripts; download it from its release page instead.
 
 To check a manual download, put `SHA256SUMS` from the same release page next
 to it and run:
@@ -270,11 +316,14 @@ prove who published the release.
 
 ### Manual download
 
-Download an archive from the [latest release page](https://github.com/ARN-Forge/ARN-Code/releases/latest),
-extract it, and keep its files together so the executable can find its bundled
-runtime libraries.
+Download an archive from the [latest release page](https://github.com/ARN-Forge/ARN-Code/releases/latest)
+(the latest stable release), extract it, and keep its files together so the
+executable can find its bundled runtime libraries. Prereleases are listed on
+the [releases page](https://github.com/ARN-Forge/ARN-Code/releases) and are
+marked as such; the v0.9.0 prerelease contains only the Linux and macOS
+archives.
 
-Available release archives are:
+A release contains some or all of these archives:
 
 - **Windows x64 CLI:** `arn-windows-x64.zip`
 - **Windows x64 IDE:** `arn-ide-windows-x64.zip` — extract it and start
@@ -284,17 +333,21 @@ Available release archives are:
 - **macOS Apple Silicon CLI:** `arn-macos-arm64.tar.gz`
 - **macOS Intel CLI:** `arn-macos-x64.tar.gz`
 
-The Windows CLI archive runs on Windows 10 and 11 x64 without a separate
-Visual C++ Redistributable: next to `arn.exe` it carries the OpenSSL DLLs and
-the Microsoft Visual C++ runtime DLLs that `arn.exe` imports (for example
-`vcruntime140.dll` and `msvcp140.dll`). Those runtime files are copied
-unchanged, Microsoft-signed, from Visual Studio's redistributable folder for
-the compiler that built the release (app-local deployment). Windows Update
-does not service app-local copies; they are updated with each ARN release.
+The Windows packages that the current release workflow builds are not part of
+the v0.9.0 prerelease (see above). As built, the Windows CLI archive runs on
+Windows 10 and 11 x64 without a separate Visual C++ Redistributable: next to
+`arn.exe` it carries the OpenSSL DLLs and the Microsoft Visual C++ runtime DLLs
+that `arn.exe` imports (for example `vcruntime140.dll` and `msvcp140.dll`),
+copied unchanged, Microsoft-signed, from Visual Studio's redistributable folder
+for the compiler that built it (app-local deployment). Windows Update does not
+service app-local copies; they are updated with each ARN release. The v0.8.0
+Windows CLI archive does not carry these runtime files and needs the Visual C++
+Redistributable installed.
 
-Every release archive contains `THIRD-PARTY-NOTICES.txt` with the licenses of
-the third-party software in it; the Windows IDE packages also contain
-`THIRD-PARTY-NOTICES-IDE.txt` for the IDE's Rust crates and npm packages.
+From v0.9.0 on, every release archive contains `THIRD-PARTY-NOTICES.txt` with
+the licenses of the third-party software in it; the Windows IDE packages also
+contain `THIRD-PARTY-NOTICES-IDE.txt` for the IDE's Rust crates and npm
+packages. Archives of earlier releases may not include these notices.
 
 ## First request
 

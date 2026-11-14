@@ -129,6 +129,73 @@ if (_badname EQUAL 0 OR _at EQUAL -1)
     list(APPEND _failures "path in expected names: accepted or wrong message: ${_badname_err}")
 endif()
 
+# The partial (Linux and macOS) release: exactly its three archives, and a
+# Windows package that the build still produced is refused, not published.
+set(_expected "arn-linux-x64.tar.gz;arn-macos-arm64.tar.gz;arn-macos-x64.tar.gz")
+set(_partial_files
+    "release-arn-linux-x64/arn-linux-x64.tar.gz=linux"
+    "release-arn-macos-arm64/arn-macos-arm64.tar.gz=arm64"
+    "release-arn-macos-x64/arn-macos-x64.tar.gz=intel")
+make_artifacts("${WORK_DIR}/partial" ${_partial_files})
+expect(partial "${WORK_DIR}/partial" pass)
+set(_dist "${WORK_DIR}/partial-dist")
+if (EXISTS "${_dist}/SHA256SUMS")
+    file(READ "${_dist}/SHA256SUMS" _manifest)
+    set(_wanted "")
+    foreach(_spec IN ITEMS "arn-linux-x64.tar.gz=linux" "arn-macos-arm64.tar.gz=arm64" "arn-macos-x64.tar.gz=intel")
+        string(REPLACE "=" ";" _pair "${_spec}")
+        list(GET _pair 0 _name)
+        list(GET _pair 1 _content)
+        string(SHA256 _hash "${_content}")
+        string(APPEND _wanted "${_hash}  ${_name}\n")
+    endforeach()
+    if (NOT _manifest STREQUAL _wanted)
+        list(APPEND _failures "partial: manifest is\n${_manifest}\nexpected\n${_wanted}")
+    endif()
+    file(GLOB _published RELATIVE "${_dist}" "${_dist}/*")
+    list(SORT _published)
+    if (NOT _published STREQUAL "SHA256SUMS;arn-linux-x64.tar.gz;arn-macos-arm64.tar.gz;arn-macos-x64.tar.gz")
+        list(APPEND _failures "partial: published files are ${_published}")
+    endif()
+    # An independent implementation must accept the manifest as written.
+    find_program(_sha256sum sha256sum)
+    find_program(_shasum shasum)
+    if (_sha256sum)
+        set(_check "${_sha256sum}" --check --strict SHA256SUMS)
+    elseif (_shasum)
+        set(_check "${_shasum}" -a 256 --check --strict SHA256SUMS)
+    else()
+        set(_check "")
+        message(STATUS "Neither sha256sum nor shasum was found; the independent manifest check is skipped.")
+    endif()
+    if (_check)
+        execute_process(COMMAND ${_check} WORKING_DIRECTORY "${_dist}"
+            RESULT_VARIABLE _check_result OUTPUT_VARIABLE _check_out ERROR_VARIABLE _check_err)
+        if (NOT _check_result EQUAL 0)
+            list(APPEND _failures "partial: ${_check} failed: ${_check_out} ${_check_err}")
+        endif()
+    endif()
+else()
+    list(APPEND _failures "partial: no SHA256SUMS written")
+endif()
+
+make_artifacts("${WORK_DIR}/partial-windows" ${_partial_files}
+    "release-arn-windows-x64/arn-windows-x64.zip=windows")
+expect(partial-with-windows-cli "${WORK_DIR}/partial-windows" fail "unexpected asset 'arn-windows-x64.zip'")
+make_artifacts("${WORK_DIR}/partial-ide" ${_partial_files}
+    "release-arn-ide-windows-x64/arn-ide-windows-x64.zip=ide"
+    "release-arn-ide-windows-x64/arn-ide-windows-x64-setup.exe=setup")
+expect(partial-with-windows-ide "${WORK_DIR}/partial-ide" fail
+    "unexpected asset 'arn-ide-windows-x64.zip'" "unexpected asset 'arn-ide-windows-x64-setup.exe'")
+make_artifacts("${WORK_DIR}/partial-no-linux"
+    "release-arn-macos-arm64/arn-macos-arm64.tar.gz=arm64"
+    "release-arn-macos-x64/arn-macos-x64.tar.gz=intel")
+expect(partial-without-linux "${WORK_DIR}/partial-no-linux" fail "expected asset 'arn-linux-x64.tar.gz' is missing")
+make_artifacts("${WORK_DIR}/partial-no-arm64"
+    "release-arn-linux-x64/arn-linux-x64.tar.gz=linux"
+    "release-arn-macos-x64/arn-macos-x64.tar.gz=intel")
+expect(partial-without-macos-arm64 "${WORK_DIR}/partial-no-arm64" fail "expected asset 'arn-macos-arm64.tar.gz' is missing")
+
 list(FILTER _failures EXCLUDE REGEX "^$")
 if (_failures)
     list(JOIN _failures "\n  - " _report)
