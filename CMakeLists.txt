@@ -50,7 +50,7 @@ else()
     if (arn_core_FOUND)
         message(STATUS "Found installed arn_core: ${arn_core_DIR}")
     else()
-        set(ARN_CORE_GIT_REVISION "3db01b6d71e02682c6d332278ce4aa78ad81f47b")
+        set(ARN_CORE_GIT_REVISION "af15723a85f55178b7cdce16eb6c1173b71be96c")
         message(STATUS "Fetching arn_core ${ARN_CORE_GIT_REVISION} from https://github.com/ARN-Forge/arn-core.git")
         FetchContent_Declare(
             arn_core
