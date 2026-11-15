@@ -100,7 +100,7 @@ SOFTWARE.
 
 3. ARN Core
    Source: https://github.com/ARN-Forge/arn-core
-           (commit 3db01b6d71e02682c6d332278ce4aa78ad81f47b)
+           (commit af15723a85f55178b7cdce16eb6c1173b71be96c)
    License: MIT
 
 MIT License
